@@ -1,0 +1,19 @@
+{
+  "name": "cco-auction-sniper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Auction valuation + sniping bot for Case Clicker Online (case-clicker.com), with a local web dashboard.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io-client": "^4.7.5",
+    "ws": "^8.18.0"
+  }
+}

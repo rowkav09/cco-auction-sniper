@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>CCO Auction Sniper</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header>
+  <h1>CCO Auction <span>Sniper</span></h1>
+  <div class="pill" id="wsPill"><span class="dot" id="wsDot"></span><span id="wsText">connecting…</span></div>
+  <div class="pill" id="ccoPill"><span class="dot" id="ccoDot"></span><span id="ccoText">CCO socket</span></div>
+  <div class="pill" id="dryPill">dry run</div>
+  <div class="spacer"></div>
+  <button id="stopBtn">Stop</button>
+  <button id="startBtn" class="primary">Start</button>
+</header>
+
+<main>
+
+  <section class="stats-grid" id="statsGrid"></section>
+
+  <section class="panel" id="settingsPanel">
+    <div class="panel-header" data-toggle="settingsPanel"><h2>Settings</h2><span class="chevron">▾</span></div>
+    <div class="panel-body">
+
+      <div class="form-row stack">
+        <label>Connection</label>
+      </div>
+      <div class="form-row">
+        <label>Cookie header</label>
+        <div>
+          <textarea id="cookieInput" placeholder="Paste the full Cookie: header from your browser's devtools (Network tab, any request to case-clicker.com). Must include cf_clearance."></textarea>
+          <div class="hint" id="cookieStatus">not configured</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>User-Agent</label>
+        <div>
+          <input id="uaInput" placeholder="Paste the exact User-Agent of the browser above (must match cf_clearance)" />
+          <div class="hint">Chrome devtools → Network → any request → Request Headers → user-agent. Must match exactly or Cloudflare voids the cookie.</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <label></label>
+        <div class="row-actions">
+          <button id="saveConnBtn" class="primary small">Save connection</button>
+          <button id="testConnBtn" class="small">Test connection</button>
+          <span class="hint" id="testConnResult"></span>
+        </div>
+      </div>
+
+      <div class="form-row stack"><label>Strategy</label></div>
+      <div class="form-row">
+        <label>Dry run (log only, never bid)</label>
+        <label class="switch"><input type="checkbox" id="dryRunToggle"><span class="slider"></span></label>
+      </div>
+      <div class="form-row">
+        <label>Bidding strategy</label>
+        <select id="strategySelect">
+          <option value="autobid">Autobid (recommended — set a hidden max, CCO's proxy system raises for you)</option>
+          <option value="snipe">Snipe (place a manual bid in the final seconds)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>Snipe window (seconds before expiry)</label>
+        <input id="snipeSecondsInput" type="number" min="1" max="120" />
+      </div>
+      <div class="hint">CCO extends an auction's deadline if a bid lands in the final minute (anti-snipe), so snipe mode mostly just delays the same outcome autobid gets you immediately. Autobid is the default for a reason.</div>
+
+      <div class="form-row stack"><label>Discovery polling</label></div>
+      <div class="form-row">
+        <label>New-listing poll (ms)</label>
+        <input id="newestPollInput" type="number" min="2000" step="1000" />
+      </div>
+      <div class="form-row">
+        <label>Full sweep poll (ms)</label>
+        <input id="fullPollInput" type="number" min="10000" step="5000" />
+      </div>
+
+      <div class="form-row stack"><label>Valuation</label></div>
+      <div class="hint">Market value = your pricedata script's dollar estimate for the skin, converted to tokens. Auctions are bid in tokens but the pricedata sheet is in dollars, so a $→tokens rate is needed. By default it self-calibrates from CCO's own comparable sales (a sample is collected whenever an auction has enough recent sales); set a manual rate below to skip waiting on that.</div>
+      <div class="form-row">
+        <label>Manual tokens-per-$ rate (optional)</label>
+        <input id="manualFxInput" type="number" min="0" step="0.01" placeholder="leave blank to auto-calibrate" />
+      </div>
+      <div class="form-row">
+        <label>Min calibration samples before trusting auto rate</label>
+        <input id="minCalSamplesInput" type="number" min="1" />
+      </div>
+      <div class="form-row">
+        <label>Min comparable sales per sample</label>
+        <input id="minCompInput" type="number" min="1" />
+      </div>
+      <div class="form-row">
+        <label>Require CCO's "valid" flag on samples</label>
+        <label class="switch"><input type="checkbox" id="requireValidToggle"><span class="slider"></span></label>
+      </div>
+
+      <div class="form-row stack"><label>Limits</label></div>
+      <div class="form-row">
+        <label>Session spend cap (tokens)</label>
+        <input id="spendCapInput" type="number" min="0" step="1000" />
+      </div>
+      <div class="hint">Hard stop on cumulative NEW token commitments since this process started. Resets on restart. Keep this low until you trust your rules.</div>
+      <div class="form-row">
+        <label>Max tracked auctions</label>
+        <input id="maxTrackedInput" type="number" min="10" step="10" />
+      </div>
+      <div class="form-row">
+        <label></label>
+        <button id="saveSettingsBtn" class="primary small">Save settings</button>
+      </div>
+
+    </div>
+  </section>
+
+  <section class="panel" id="rulesPanel">
+    <div class="panel-header" data-toggle="rulesPanel"><h2>Bidding rules</h2><span class="chevron">▾</span></div>
+    <div class="panel-body">
+      <div class="hint">Rules are checked top to bottom; the first enabled rule whose filters match an auctioned skin is used. If nothing matches, the auction is ignored unless the default rule below is enabled.</div>
+      <div id="rulesList"></div>
+      <button id="addRuleBtn" class="small">+ Add rule</button>
+
+      <div class="rule-card" id="defaultRuleCard">
+        <div class="rule-head">
+          <label class="switch"><input type="checkbox" id="defaultRuleEnabled"><span class="slider"></span></label>
+          <strong>Default rule</strong>
+          <span class="hint">(applies to any auction no other rule matched)</span>
+        </div>
+        <div class="match-grid">
+          <div><label>Threshold % of market value</label><input id="defaultThreshold" type="number" min="1" max="100"></div>
+          <div><label>Max bid % of market value</label><input id="defaultMaxBidPct" type="number" min="1" max="200"></div>
+        </div>
+        <button id="saveDefaultRuleBtn" class="small">Save default rule</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="auctionsPanel">
+    <div class="panel-header" data-toggle="auctionsPanel"><h2>Tracked auctions</h2><span class="chevron">▾</span></div>
+    <div class="panel-body">
+      <table>
+        <thead>
+          <tr>
+            <th>Skin</th><th>Current bid</th><th>Min next</th><th>Market value</th><th>Time left</th><th>Decision</th>
+          </tr>
+        </thead>
+        <tbody id="auctionsBody"></tbody>
+      </table>
+      <div class="empty" id="auctionsEmpty" style="display:none">No auctions tracked yet.</div>
+    </div>
+  </section>
+
+  <section class="panel" id="logPanel">
+    <div class="panel-header" data-toggle="logPanel"><h2>Activity log</h2><span class="chevron">▾</span></div>
+    <div class="panel-body">
+      <div id="log"></div>
+    </div>
+  </section>
+
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
