@@ -30,23 +30,15 @@
         <label>Connection</label>
       </div>
       <div class="form-row">
-        <label>Cookie header</label>
+        <label>Signed in as</label>
         <div>
-          <textarea id="cookieInput" placeholder="Paste the full Cookie: header from your browser's devtools (Network tab, any request to case-clicker.com). Must include cf_clearance."></textarea>
-          <div class="hint" id="cookieStatus">not configured</div>
-        </div>
-      </div>
-      <div class="form-row">
-        <label>User-Agent</label>
-        <div>
-          <input id="uaInput" placeholder="Paste the exact User-Agent of the browser above (must match cf_clearance)" />
-          <div class="hint">Chrome devtools → Network → any request → Request Headers → user-agent. Must match exactly or Cloudflare voids the cookie.</div>
+          <div class="hint" id="browserStatus">not started</div>
+          <div class="hint">Sign-in happens in a real Chrome window this app opens and controls (case-clicker.com is behind Cloudflare bot protection that blocks plain script requests, even with a valid cookie -- a real browser is the only thing that gets through). First run: log in in that window when it appears. After that, the session is remembered in <code>data/browser-profile/</code> and it won't ask again.</div>
         </div>
       </div>
       <div class="form-row">
         <label></label>
         <div class="row-actions">
-          <button id="saveConnBtn" class="primary small">Save connection</button>
           <button id="testConnBtn" class="small">Test connection</button>
           <span class="hint" id="testConnResult"></span>
         </div>
@@ -136,16 +128,39 @@
         </div>
         <button id="saveDefaultRuleBtn" class="small">Save default rule</button>
       </div>
+
+      <div class="form-row stack"><label>Favorite patterns</label></div>
+      <div class="form-row">
+        <label>One name/pattern per line</label>
+        <div>
+          <textarea id="favoritesInput" placeholder="e.g.&#10;Karambit&#10;Dragon Lore&#10;Fade"></textarea>
+          <div class="hint">Case-insensitive substring match against the skin name. Doesn't affect bidding -- just lets you sort/spot them in the tracked-auctions table below.</div>
+        </div>
+      </div>
+      <div class="form-row">
+        <label></label>
+        <button id="saveFavoritesBtn" class="small">Save favorites</button>
+      </div>
     </div>
   </section>
 
   <section class="panel" id="auctionsPanel">
     <div class="panel-header" data-toggle="auctionsPanel"><h2>Tracked auctions</h2><span class="chevron">▾</span></div>
     <div class="panel-body">
+      <div class="row-actions">
+        <button id="refreshAuctionsBtn" class="small">Refresh now</button>
+        <select id="sortModeSelect" style="width:auto">
+          <option value="timeLeft">Sort: time left</option>
+          <option value="favorite">Sort: favorites first</option>
+          <option value="marketValue">Sort: market value (high-low)</option>
+          <option value="discount">Sort: discount % (min next vs. market value)</option>
+          <option value="bidCount">Sort: number of bids</option>
+        </select>
+      </div>
       <table>
         <thead>
           <tr>
-            <th>Skin</th><th>Current bid</th><th>Min next</th><th>Market value</th><th>Time left</th><th>Decision</th>
+            <th>Skin</th><th>Current bid</th><th>Min next</th><th>Market value</th><th>Bids</th><th>Time left</th><th>Decision</th><th>Quick actions</th>
           </tr>
         </thead>
         <tbody id="auctionsBody"></tbody>

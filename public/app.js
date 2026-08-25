@@ -6,6 +6,7 @@ const state = {
   stats: {},
   auctions: [],
   priceData: {},
+  sortMode: 'timeLeft',
 };
 
 function fmt(n) {
@@ -64,6 +65,9 @@ function connectWs() {
     } else if (type === 'fx') {
       state.fx = payload;
       renderStats();
+    } else if (type === 'browser') {
+      state.browser = payload;
+      renderBrowserStatus();
     }
   };
 }
@@ -72,6 +76,23 @@ function setWsStatus(on) {
   document.getElementById('wsText').textContent = on ? 'dashboard connected' : 'reconnecting…';
 }
 connectWs();
+
+// ---------- render: browser/CCO connection status ----------
+function renderBrowserStatus() {
+  const b = state.browser;
+  const ccoDot = document.getElementById('ccoDot');
+  const ccoText = document.getElementById('ccoText');
+  const statusEl = document.getElementById('browserStatus');
+  if (!b || !b.ready) {
+    ccoDot.className = 'dot off';
+    ccoText.textContent = 'browser not started';
+    if (statusEl) statusEl.textContent = 'not started -- click Start (a Chrome window will open)';
+    return;
+  }
+  ccoDot.className = 'dot ' + (b.socketConnected ? 'on' : 'off');
+  ccoText.textContent = b.socketConnected ? `live (${b.userName})` : `browser ready, socket reconnecting…`;
+  if (statusEl) statusEl.textContent = `${b.userName} (${b.userId})${b.socketConnected ? ', websocket connected' : ', websocket reconnecting…'}`;
+}
 
 // ---------- render: stats ----------
 function renderStats() {
@@ -111,6 +132,42 @@ function renderStats() {
 }
 
 // ---------- render: auctions ----------
+function discountPct(a) {
+  if (a.marketValueTokens == null || !a.marketValueTokens) return -Infinity;
+  return 100 * (1 - a.minNextBid / a.marketValueTokens);
+}
+
+function sortedAuctions() {
+  const list = [...state.auctions];
+  switch (state.sortMode) {
+    case 'favorite':
+      return list.sort((a, b) => (b.isFavorite - a.isFavorite) || (new Date(a.expiresAt) - new Date(b.expiresAt)));
+    case 'marketValue':
+      return list.sort((a, b) => (b.marketValueTokens || 0) - (a.marketValueTokens || 0));
+    case 'discount':
+      return list.sort((a, b) => discountPct(b) - discountPct(a));
+    case 'bidCount':
+      return list.sort((a, b) => (b.bidCount || 0) - (a.bidCount || 0));
+    default:
+      return list; // server already sends time-left order
+  }
+}
+
+async function quickAutobid(id, pct, btn) {
+  btn.disabled = true;
+  const original = btn.textContent;
+  btn.textContent = '...';
+  try {
+    const res = await fetch(`/api/auctions/${id}/quick-autobid`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pct }),
+    }).then((r) => r.json());
+    if (!res.ok) { btn.textContent = original; alert(`Couldn't set autobid: ${res.error}`); }
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 function renderAuctions() {
   const body = document.getElementById('auctionsBody');
   const empty = document.getElementById('auctionsEmpty');
@@ -120,24 +177,38 @@ function renderAuctions() {
     return;
   }
   empty.style.display = 'none';
-  body.innerHTML = state.auctions.map((a) => {
+  body.innerHTML = sortedAuctions().map((a) => {
     const decision = a.lastDecision;
     const verdict = decision?.verdict || 'pending';
     const skinName = `${a.statTrak ? 'StatTrak™ ' : ''}${a.name || '?'}${a.exterior ? ` (${a.exterior})` : ''}`;
+    const canAct = !a.isLeading && !a.cooldown && a.marketValueTokens != null && a.status === 'active' && !a.isLocked;
     return `<tr>
-      <td>${a.iconUrl ? `<img class="icon" src="https://case-clicker.com/pictures/skins/${a.iconUrl}" onerror="this.style.display='none'">` : ''} ${skinName}
+      <td>${a.iconUrl ? `<img class="icon" src="https://case-clicker.com/pictures/skins/${a.iconUrl}" onerror="this.style.display='none'">` : ''} ${a.isFavorite ? '★ ' : ''}${skinName}
         ${a.isLeading ? '<span class="tag leading">LEADING</span>' : ''}
         ${a.cooldown ? '<span class="tag skip">cooldown</span>' : ''}
       </td>
       <td class="mono">${fmt(a.currentBid)}</td>
       <td class="mono">${fmt(a.minNextBid)}</td>
       <td class="mono">${a.marketValueTokens != null ? fmt(a.marketValueTokens) : (a.valuationConfidence || '—')}</td>
+      <td class="mono">${fmt(a.bidCount)}</td>
       <td class="mono">${timeLeft(a.expiresAt)}</td>
       <td><span class="tag ${verdict}">${verdict}</span><div class="decision-reason">${decision?.reason || ''}</div></td>
+      <td>${canAct ? [20, 50, 100].map((pct) => `<button class="small qa-btn" data-id="${a.id}" data-pct="${pct}">${pct}%</button>`).join(' ') : ''}</td>
     </tr>`;
   }).join('');
+  body.querySelectorAll('.qa-btn').forEach((btn) => {
+    btn.addEventListener('click', () => quickAutobid(btn.dataset.id, Number(btn.dataset.pct), btn));
+  });
 }
 setInterval(() => { if (state.auctions.length) renderAuctions(); }, 1000);
+
+document.getElementById('sortModeSelect').addEventListener('change', (e) => { state.sortMode = e.target.value; renderAuctions(); });
+document.getElementById('refreshAuctionsBtn').addEventListener('click', async (e) => {
+  e.target.disabled = true;
+  e.target.textContent = 'refreshing…';
+  try { await fetch('/api/control/refresh', { method: 'POST' }); }
+  finally { e.target.disabled = false; e.target.textContent = 'Refresh now'; }
+});
 
 // ---------- render: log ----------
 function appendLog(entry) {
@@ -158,8 +229,6 @@ function renderLog() {
 function renderSettingsForm() {
   const s = state.settings;
   if (!s) return;
-  document.getElementById('cookieStatus').textContent = s.cco.cookieConfigured ? `configured (${s.cco.cookiePreview})` : 'not configured — paste your Cookie header above';
-  document.getElementById('uaInput').placeholder = s.cco.userAgent ? `current: ${s.cco.userAgent}` : 'Paste the exact User-Agent of the browser above (must match cf_clearance)';
   document.getElementById('dryRunToggle').checked = !!s.dryRun;
   document.getElementById('strategySelect').value = s.strategy;
   document.getElementById('snipeSecondsInput').value = s.snipeSeconds;
@@ -174,14 +243,12 @@ function renderSettingsForm() {
   document.getElementById('defaultRuleEnabled').checked = !!s.defaultRule.enabled;
   document.getElementById('defaultThreshold').value = s.defaultRule.thresholdPct;
   document.getElementById('defaultMaxBidPct').value = s.defaultRule.maxBidPct;
+  document.getElementById('favoritesInput').value = (s.favorites || []).join('\n');
 }
 
-document.getElementById('saveConnBtn').addEventListener('click', async () => {
-  const cookie = document.getElementById('cookieInput').value.trim();
-  const userAgent = document.getElementById('uaInput').value.trim();
-  await patchSettings({ cco: { cookie, userAgent } });
-  document.getElementById('cookieInput').value = '';
-  document.getElementById('uaInput').value = '';
+document.getElementById('saveFavoritesBtn').addEventListener('click', async () => {
+  const favorites = document.getElementById('favoritesInput').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  await patchSettings({ favorites });
 });
 
 document.getElementById('testConnBtn').addEventListener('click', async () => {
@@ -327,4 +394,5 @@ function renderAll() {
   renderSettingsForm();
   renderRules();
   renderLog();
+  renderBrowserStatus();
 }

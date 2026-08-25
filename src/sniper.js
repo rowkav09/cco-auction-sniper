@@ -1,6 +1,7 @@
 import { store } from './store.js';
-import { listAuctions, getSession } from './ccoRest.js';
+import { listAuctions } from './ccoRest.js';
 import { ccoSocket } from './ccoSocket.js';
+import { browserSession } from './browserSession.js';
 import { valuateAuction, invalidateHistoryCache } from './pricing.js';
 
 // Reverse-engineered from case-clicker.com's client bundle (module 10893 in the auction detail
@@ -46,6 +47,13 @@ function skinLabel(skin) {
   return `${skin.statTrak ? 'StatTrak™ ' : ''}${skin.name || 'unknown'}`;
 }
 
+function isFavoriteSkin(skin) {
+  const favorites = store.settings.favorites || [];
+  if (!favorites.length || !skin?.name) return false;
+  const name = skin.name.toLowerCase();
+  return favorites.some((f) => f && name.includes(f.toLowerCase()));
+}
+
 class Sniper {
   constructor() {
     this.auctions = new Map(); // auctionId -> auction doc (as last known)
@@ -84,6 +92,7 @@ class Sniper {
       marketValueTokens: a._marketValueTokens ?? null,
       valuationConfidence: a._valuationConfidence ?? null,
       cooldown: store.isOnCooldown(a._id),
+      isFavorite: isFavoriteSkin(a.auctionedSkinId),
     })).sort((x, y) => new Date(x.expiresAt) - new Date(y.expiresAt));
   }
 
@@ -91,13 +100,9 @@ class Sniper {
     if (this._running) return;
     this._running = true;
 
-    try {
-      const session = await getSession();
-      this.ourUserId = session?.user?.id || null;
-      store.log('info', `identified as user ${session?.user?.name || '?'} (${this.ourUserId || 'unknown id'})`);
-    } catch (e) {
-      store.log('error', `could not fetch session (check cookie/UA in settings): ${e.message}`);
-    }
+    await browserSession.start(); // opens/reuses the Chrome window, blocks here until logged in
+    this.ourUserId = browserSession.userId;
+    store.log('info', `identified as user ${browserSession.userName || '?'} (${this.ourUserId || 'unknown id'})`);
 
     ccoSocket.connect();
     this._wireSocketEvents();
@@ -327,27 +332,81 @@ class Sniper {
       return;
     }
 
+    if (strategy === 'autobid') {
+      await this._executeAutobid(auction, skin, maxBid, marketValue, rule.name || rule.id);
+    } else {
+      await this._executeSnipeBid(auction, skin, minNext, marketValue, rule.name || rule.id);
+    }
+  }
+
+  /** Sets an autobid and records the (worst-case) commitment. Used by both the rule engine and
+   * the dashboard's manual quick-action buttons. Caller is responsible for dry-run/cap checks. */
+  async _executeAutobid(auction, skin, maxBid, marketValue, ruleLabel) {
     try {
-      if (strategy === 'autobid') {
-        ccoSocket.setAutobid(auction._id, maxBid);
-        store.bumpAutobidsSet();
-        this.ownedByUs.set(auction._id, { amount: maxBid, rule: rule.id, marketValueTokens: marketValue });
-        store.setHeld(auction._id, maxBid);
-        store.addSessionCommitted(maxBid);
-        auction._decision = { verdict: 'autobid-set', reason: `autobid up to ${fmt(maxBid)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: rule.name || rule.id };
-        store.log('info', `set autobid on ${skinLabel(skin)}: up to ${fmt(maxBid)} tokens`, { auctionId: auction._id, marketValue });
-      } else {
-        ccoSocket.placeBid(auction._id, minNext);
-        store.bumpBidsPlaced();
-        this.ownedByUs.set(auction._id, { amount: minNext, rule: rule.id, marketValueTokens: marketValue });
-        store.setHeld(auction._id, minNext);
-        store.addSessionCommitted(minNext);
-        auction._decision = { verdict: 'bid-placed', reason: `bid ${fmt(minNext)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: rule.name || rule.id };
-        store.log('info', `placed snipe bid on ${skinLabel(skin)}: ${fmt(minNext)} tokens`, { auctionId: auction._id, marketValue });
-      }
+      await ccoSocket.setAutobid(auction._id, maxBid);
+      store.bumpAutobidsSet();
+      this.ownedByUs.set(auction._id, { amount: maxBid, rule: ruleLabel, marketValueTokens: marketValue });
+      store.setHeld(auction._id, maxBid);
+      store.addSessionCommitted(maxBid);
+      auction._decision = { verdict: 'autobid-set', reason: `autobid up to ${fmt(maxBid)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: ruleLabel };
+      store.log('info', `set autobid on ${skinLabel(skin)}: up to ${fmt(maxBid)} tokens`, { auctionId: auction._id, marketValue });
+      return true;
     } catch (e) {
       store.log('error', `emit failed for ${auction._id}: ${e.message}`);
+      return false;
     }
+  }
+
+  async _executeSnipeBid(auction, skin, amount, marketValue, ruleLabel) {
+    try {
+      await ccoSocket.placeBid(auction._id, amount);
+      store.bumpBidsPlaced();
+      this.ownedByUs.set(auction._id, { amount, rule: ruleLabel, marketValueTokens: marketValue });
+      store.setHeld(auction._id, amount);
+      store.addSessionCommitted(amount);
+      auction._decision = { verdict: 'bid-placed', reason: `bid ${fmt(amount)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: ruleLabel };
+      store.log('info', `placed bid on ${skinLabel(skin)}: ${fmt(amount)} tokens`, { auctionId: auction._id, marketValue });
+      return true;
+    } catch (e) {
+      store.log('error', `emit failed for ${auction._id}: ${e.message}`);
+      return false;
+    }
+  }
+
+  /** Manual one-click action from the dashboard: set an autobid at pct% of this auction's
+   * already-computed market value, bypassing the rule engine entirely. Still respects the
+   * safety checks (self-bid guard, lock/cooldown, consecutive-bid limit, session spend cap,
+   * dry run) since those protect the account regardless of what triggered the bid. */
+  async quickAutobid(auctionId, pct) {
+    const auction = this.auctions.get(auctionId);
+    if (!auction) return { ok: false, error: 'auction not tracked' };
+    if (auction.status !== 'active' || auction.isLocked) return { ok: false, error: 'auction is not active/bid-locked' };
+    if (store.isOnCooldown(auctionId)) return { ok: false, error: 'auction is on cooldown after a previous rejection' };
+    if (this.ourUserId && auction.currentBidder === this.ourUserId) return { ok: false, error: 'already leading this auction' };
+    if ((auction.consecutiveBidCount || 0) >= MAX_CONSECUTIVE_BIDS) return { ok: false, error: 'consecutive-bid limit already reached here' };
+
+    const marketValue = auction._marketValueTokens;
+    if (!marketValue) return { ok: false, error: `no market value yet (${auction._valuationConfidence || 'unvalued'})` };
+
+    const maxBid = Math.min(Math.round(marketValue * (pct / 100)), MAX_SINGLE_BID);
+    const minNext = minNextBid(auction.currentBid, auction.startingPrice);
+    if (minNext > maxBid) return { ok: false, error: `min next bid ${fmt(minNext)} exceeds ${pct}% of market value (${fmt(maxBid)})` };
+
+    const sessionCommitted = store.runtime.ledger.sessionCommitted || 0;
+    if (sessionCommitted + maxBid > store.settings.limits.sessionSpendCap) return { ok: false, error: 'would exceed session spend cap' };
+
+    const skin = auction.auctionedSkinId;
+    const label = `manual ${pct}%`;
+    if (store.settings.dryRun) {
+      auction._decision = { verdict: 'would-bid', reason: `[dry run] manual: would set autobid up to ${fmt(maxBid)} tokens (${pct}% of ${fmt(marketValue)} market value)`, at: Date.now(), rule: label };
+      store.log('info', `[dry run] manual autobid on ${skinLabel(skin)}: would go up to ${fmt(maxBid)} tokens`, { auctionId, marketValue, pct });
+      this.broadcastState();
+      return { ok: true, dryRun: true, maxBid };
+    }
+
+    const success = await this._executeAutobid(auction, skin, maxBid, marketValue, label);
+    this.broadcastState();
+    return success ? { ok: true, maxBid } : { ok: false, error: 'emit failed, check activity log' };
   }
 }
 

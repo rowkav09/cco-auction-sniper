@@ -12,15 +12,9 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const DEFAULT_SETTINGS = {
   port: 8934,
-  cco: {
-    // Full raw `Cookie:` header string copied from the browser's devtools, e.g.
-    // "cf_clearance=...; better-auth.session_token=...". Must include cf_clearance or
-    // every request gets Cloudflare's "Just a moment..." challenge page instead of JSON.
-    cookie: '',
-    // Must match the User-Agent of the browser that produced the cf_clearance cookie above,
-    // or Cloudflare voids it.
-    userAgent: '',
-  },
+  // No cookie/token settings here: sign-in happens by logging into case-clicker.com in the
+  // Playwright-controlled Chrome window (see browserSession.js). The session lives in that
+  // browser profile (data/browser-profile/), not in this settings file.
   dryRun: true,
   strategy: 'autobid', // 'autobid' | 'snipe'
   snipeSeconds: 8,
@@ -51,6 +45,9 @@ const DEFAULT_SETTINGS = {
     maxBidPct: 85,
   },
   rules: [],
+  // Substrings matched (case-insensitive) against a skin's name, purely to sort/flag them in the
+  // dashboard's tracked-auctions table -- doesn't affect bidding decisions on its own.
+  favorites: [],
 };
 
 function deepMerge(base, override) {

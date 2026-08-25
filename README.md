@@ -23,15 +23,15 @@ This starts the dashboard at **http://localhost:8934** (change `port` in Setting
 
 ### Connecting your account
 
-The bot authenticates as *you*, using your existing browser session — there's no separate login flow, and it never sees your password.
+case-clicker.com sits behind Cloudflare bot protection that fingerprints the connection itself, not just cookies — a plain script gets a "Just a moment…" challenge page back even with a perfectly valid, freshly-copied session cookie. So instead of hand-copying cookies, this app opens and drives a real Chrome window (via Playwright) and does all sign-in and requests through that.
 
-1. Log into case-clicker.com in Chrome as normal.
-2. Open DevTools → Network tab, reload the page, click any request to `case-clicker.com`.
-3. Under **Request Headers**, copy the entire `cookie:` value and paste it into **Settings → Cookie header** in the dashboard.
-4. Copy the `user-agent:` value from the same request into **Settings → User-Agent**. This has to match exactly — the site's Cloudflare protection binds its clearance cookie to a specific browser fingerprint, so a mismatched User-Agent gets you a "Just a moment…" challenge page instead of JSON.
-5. Click **Save connection**, then **Test connection** to confirm.
+1. Run `npm start`.
+2. A Chrome window opens automatically and goes to case-clicker.com. First time, log in there like normal.
+3. That's it — the session is saved in `data/browser-profile/` (a dedicated Chrome profile, separate from your everyday one), so it won't ask again on future runs.
 
-The cookie must include `cf_clearance` (not just the login/session cookie) or every request will be blocked by Cloudflare. If Test Connection reports a Cloudflare challenge error, re-copy the cookie — `cf_clearance` is short-lived and needs refreshing periodically (re-copy it whenever the test starts failing).
+Leave that window open while the app runs; closing it disconnects the bot. It doesn't need to be in the foreground, just not closed.
+
+Cloudflare's bot-management for this zone can be inconsistent even for a genuine, human-driven Chrome session — if sign-in gets stuck on "Just a moment…" for more than 10-20 seconds, try a manual reload in that window, or restart `npm start`.
 
 ### Dry run first
 
@@ -58,18 +58,25 @@ An auction that matches no rule is ignored, unless you enable the **default rule
 
 - The exact payload shape of `bidRejected`, `autobidFailed`, `outbid`, and `auctionError` socket events wasn't confirmed against a real rejection/loss (that would have meant deliberately losing test auctions). The handlers read common field names defensively and log the raw payload either way — check the Activity Log the first few times these fire and adjust `src/sniper.js` (`_onFailure`) if the reason text looks off.
 - The `sort` values accepted by `GET /api/auctions` (`newest`, `endingSoon`) are inferred from the site's minified bundle, not exhaustively enumerated. If discovery seems to miss auctions, check `src/sniper.js` (`pollNewest`/`pollFull`).
-- Cloudflare may fingerprint at the TLS/HTTP level in addition to the cookie + User-Agent pair. If a correctly-configured cookie still gets challenged, that's why — there isn't a pure-Node workaround for that beyond keeping the cookie fresh and identical to a real browser's.
+- Cloudflare's bot-management for this zone was flaky during testing: real Chrome driven by Playwright got a clean response most of the time, but occasionally landed on "Just a moment…" for no obvious reason, seemingly tied to how much automated traffic had recently come from the same connection. A normal, infrequent usage pattern (this app polling every several seconds, not dozens of rapid manual requests) should fare better than what testing looked like. If sign-in or requests start failing consistently, close the browser window and rerun `npm start`.
 
 ## Architecture
 
 ```
 src/
-  server.js    Express + WS dashboard server, wires everything together
-  store.js     settings/ledger/log persistence (data/*.json, data/log.jsonl)
-  ccoRest.js   REST client for case-clicker.com (cookie/UA auth, Cloudflare detection)
-  ccoSocket.js Socket.IO client for wss://ws.case-clicker.com (live updates + bidding)
-  pricing.js   Google Sheet pricedata (ported calcPrice) + $->tokens calibration
-  sniper.js    discovery polling, rule matching, decision engine, bid execution
-public/        vanilla JS/HTML/CSS dashboard (no build step)
-data/          settings.json, runtime.json (ledger/stats/calibration), log.jsonl
+  server.js         Express + WS dashboard server, wires everything together
+  store.js          settings/ledger/log persistence (data/*.json, data/log.jsonl)
+  browserSession.js launches/drives the real Chrome window (Playwright) that all
+                     requests actually run through, and bridges its in-page socket
+                     connection back to Node -- see the comment at the top of the
+                     file for why a plain Node client can't be used here
+  ccoRest.js        REST calls, now just browserSession.apiGet() wrappers
+  ccoSocket.js      same EventEmitter interface sniper.js expects, backed by the
+                     bridged in-page socket instead of a direct connection
+  pricing.js        Google Sheet pricedata (ported calcPrice) + $->tokens calibration
+  sniper.js         discovery polling, rule matching, decision engine, bid execution
+public/             vanilla JS/HTML/CSS dashboard (no build step)
+data/               settings.json, runtime.json (ledger/stats/calibration), log.jsonl,
+                     browser-profile/ (the Chrome profile holding your session -- never
+                     commit this)
 ```
