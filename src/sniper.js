@@ -65,7 +65,22 @@ class Sniper {
     this._listeners = [];
   }
 
+  /** Coalesces bursts of updates (a live auction house can push several auctionUpdated events a
+   * second across the auctions we're subscribed to) into at most one dashboard refresh per
+   * ~800ms, instead of a full-table re-render (and re-sort) on every single one -- that was
+   * making the tracked-auctions table visibly jump around and made the quick-action buttons hard
+   * to click since the row underneath them kept getting rebuilt mid-click. */
   broadcastState() {
+    if (this._broadcastTimer) return;
+    this._broadcastTimer = setTimeout(() => {
+      this._broadcastTimer = null;
+      store._notify('auctions', this.snapshot());
+    }, 800);
+  }
+
+  broadcastStateImmediately() {
+    clearTimeout(this._broadcastTimer);
+    this._broadcastTimer = null;
     store._notify('auctions', this.snapshot());
   }
 
@@ -90,6 +105,8 @@ class Sniper {
       sellerName: a.seller?.name,
       lastDecision: a._decision || null,
       marketValueTokens: a._marketValueTokens ?? null,
+      marketValueDollars: a._marketValueDollars ?? null,
+      fxSource: a._fxSource ?? null,
       valuationConfidence: a._valuationConfidence ?? null,
       cooldown: store.isOnCooldown(a._id),
       isFavorite: isFavoriteSkin(a.auctionedSkinId),
@@ -240,6 +257,16 @@ class Sniper {
     this.broadcastState();
   }
 
+  /** Re-runs valuation/rule evaluation for every currently tracked auction without a fresh REST
+   * sweep -- used when a settings change (FX rate, rules, thresholds) should immediately update
+   * what's already on screen instead of waiting for the next bid event or poll to touch each one. */
+  async reevaluateAll() {
+    await Promise.all([...this.auctions.values()].map((auction) =>
+      this.evaluateAuction(auction).catch((e) => store.log('error', `re-evaluate failed: ${e.message}`))
+    ));
+    this.broadcastStateImmediately();
+  }
+
   _ingest(list) {
     for (const a of list) {
       const existing = this.auctions.get(a._id);
@@ -267,6 +294,14 @@ class Sniper {
     const skin = auction.auctionedSkinId;
     if (!skin) return;
 
+    // Valuation runs regardless of rule match / leading status so the dashboard always shows the
+    // pricedata-script estimate for every tracked auction, not just the ones we're bidding on.
+    const valuation = await valuateAuction(auction);
+    auction._marketValueTokens = valuation.marketValueTokens;
+    auction._marketValueDollars = valuation.dollarEstimate?.calc ?? null;
+    auction._valuationConfidence = valuation.confidence;
+    auction._fxSource = valuation.fx?.source ?? null;
+
     const rule = findMatchingRule(skin);
     if (!rule) { auction._decision = { verdict: 'no-rule', at: Date.now() }; return; }
 
@@ -276,9 +311,6 @@ class Sniper {
       return;
     }
 
-    const valuation = await valuateAuction(auction);
-    auction._marketValueTokens = valuation.marketValueTokens;
-    auction._valuationConfidence = valuation.confidence;
     if (valuation.confidence !== 'ok') {
       auction._decision = { verdict: 'skip', reason: valuation.reason, at: Date.now(), rule: rule.name || rule.id };
       return;
@@ -400,12 +432,12 @@ class Sniper {
     if (store.settings.dryRun) {
       auction._decision = { verdict: 'would-bid', reason: `[dry run] manual: would set autobid up to ${fmt(maxBid)} tokens (${pct}% of ${fmt(marketValue)} market value)`, at: Date.now(), rule: label };
       store.log('info', `[dry run] manual autobid on ${skinLabel(skin)}: would go up to ${fmt(maxBid)} tokens`, { auctionId, marketValue, pct });
-      this.broadcastState();
+      this.broadcastStateImmediately();
       return { ok: true, dryRun: true, maxBid };
     }
 
     const success = await this._executeAutobid(auction, skin, maxBid, marketValue, label);
-    this.broadcastState();
+    this.broadcastStateImmediately();
     return success ? { ok: true, maxBid } : { ok: false, error: 'emit failed, check activity log' };
   }
 }

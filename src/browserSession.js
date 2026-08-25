@@ -29,6 +29,35 @@ const SOCKET_EVENTS = [
   'auctionWatchlistUpdated', 'auctionError',
 ];
 
+/** Limits concurrent async jobs and staggers them slightly, so a burst of calls (e.g. a full
+ * discovery sweep wanting /history for every tracked auction) doesn't fire dozens of requests
+ * at once and trip CCO's own rate limiter. */
+class RequestQueue {
+  constructor(concurrency, minGapMs) {
+    this.concurrency = concurrency;
+    this.minGapMs = minGapMs;
+    this.active = 0;
+    this.queue = [];
+  }
+
+  run(fn) {
+    return new Promise((resolve, reject) => {
+      this.queue.push({ fn, resolve, reject });
+      this._pump();
+    });
+  }
+
+  _pump() {
+    while (this.active < this.concurrency && this.queue.length) {
+      const { fn, resolve, reject } = this.queue.shift();
+      this.active++;
+      fn().then(resolve, reject).finally(() => {
+        setTimeout(() => { this.active--; this._pump(); }, this.minGapMs);
+      });
+    }
+  }
+}
+
 class BrowserSession extends EventEmitter {
   constructor() {
     super();
@@ -39,6 +68,7 @@ class BrowserSession extends EventEmitter {
     this.userId = null;
     this.userName = null;
     this._starting = null;
+    this._requestQueue = new RequestQueue(3, 150);
   }
 
   /** Idempotent -- safe to call from multiple places (server boot, dashboard Start button). */
@@ -54,7 +84,10 @@ class BrowserSession extends EventEmitter {
       channel: 'chrome',
       headless: false, // bidding is consequential even in a game -- keep it visible, not a silent background process
       viewport: { width: 1100, height: 800 },
-      args: ['--window-position=0,0'],
+      // Without this, Playwright leaves navigator.webdriver === true, which Cloudflare's bot
+      // management checks for directly -- confirmed empirically: same profile, same site, 403
+      // "Just a moment..." with this flag absent, clean 200 JSON with it present.
+      args: ['--window-position=0,0', '--disable-blink-features=AutomationControlled'],
     });
     this.page = this.context.pages()[0] || (await this.context.newPage());
     this.context.on('close', () => { this.ready = false; this.socketConnected = false; store.log('warn', 'browser window was closed -- restart the app to reconnect'); });
@@ -130,7 +163,15 @@ class BrowserSession extends EventEmitter {
     );
   }
 
-  async apiGet(pathAndQuery) {
+  apiGet(pathAndQuery) {
+    // CCO rate-limits its own API per-IP (the pricedata userscript this project is based on has
+    // the same note -- fetching a big batch of pages/history calls at once trips it). A full
+    // discovery sweep can want history for a couple hundred auctions at nearly the same instant,
+    // so queue them instead of firing them all as concurrent page.evaluate calls.
+    return this._requestQueue.run(() => this._rawApiGet(pathAndQuery));
+  }
+
+  async _rawApiGet(pathAndQuery) {
     const result = await this.page.evaluate(
       async (p) => {
         try {

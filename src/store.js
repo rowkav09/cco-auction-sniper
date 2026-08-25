@@ -25,13 +25,17 @@ const DEFAULT_SETTINGS = {
   },
   valuation: {
     // Gate for admitting a comparable-sales sample into the $->tokens calibration (see pricing.js) --
-    // NOT a gate on the pricedata-based valuation itself, which is the primary signal.
-    minComparableSales: 2,
-    requireValid: true,
-    minCalibrationSamples: 3,
-    // Overrides auto-calibration entirely if set (tokens per $1 of pricedata value). Leave null
-    // to let it self-calibrate from CCO's own comparable sales.
-    manualTokensPerDollar: null,
+    // NOT a gate on the pricedata-based valuation itself, which is the primary signal. Defaults
+    // are loose (1 sale, don't require CCO's "valid" flag) because a young auction house has few
+    // closed sales to calibrate from -- tighten these once there's enough volume that noisy
+    // samples are worth filtering out.
+    minComparableSales: 1,
+    requireValid: false,
+    minCalibrationSamples: 1,
+    // Confirmed exchange rate: 10 tokens = $1. Set to null to fall back to self-calibrating from
+    // CCO's own comparable sales instead (see getTokensPerDollar() in pricing.js) -- kept as an
+    // option in case the real rate ever changes or turns out to vary by item tier.
+    manualTokensPerDollar: 10,
   },
   limits: {
     // Hard stop on cumulative NEW token commitments this run. Resets on server restart.

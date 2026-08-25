@@ -53,17 +53,30 @@ function fullState() {
 app.get('/api/state', (req, res) => res.json(fullState()));
 
 app.post('/api/settings', (req, res) => {
-  store.updateSettings(req.body || {});
+  const patch = req.body || {};
+  store.updateSettings(patch);
   res.json(store.settings);
+  // Valuation changes (e.g. the $->tokens rate) should show up on already-tracked auctions right
+  // away instead of trickling in as each one happens to get a fresh bid event.
+  if (patch.valuation) sniper.reevaluateAll().catch((e) => store.log('error', `reevaluate after settings change failed: ${e.message}`));
 });
 
-app.post('/api/rules', (req, res) => res.json(store.addRule(req.body || {})));
+app.post('/api/rules', (req, res) => {
+  const rule = store.addRule(req.body || {});
+  res.json(rule);
+  sniper.reevaluateAll().catch((e) => store.log('error', `reevaluate after rule add failed: ${e.message}`));
+});
 app.put('/api/rules/:id', (req, res) => {
   const updated = store.updateRule(req.params.id, req.body || {});
   if (!updated) return res.status(404).json({ error: 'not found' });
   res.json(updated);
+  sniper.reevaluateAll().catch((e) => store.log('error', `reevaluate after rule update failed: ${e.message}`));
 });
-app.delete('/api/rules/:id', (req, res) => { store.removeRule(req.params.id); res.json({ ok: true }); });
+app.delete('/api/rules/:id', (req, res) => {
+  store.removeRule(req.params.id);
+  res.json({ ok: true });
+  sniper.reevaluateAll().catch((e) => store.log('error', `reevaluate after rule delete failed: ${e.message}`));
+});
 
 app.post('/api/test-connection', async (req, res) => {
   if (!browserSession.ready) return res.json({ ok: false, error: 'browser session not started yet -- click Start' });

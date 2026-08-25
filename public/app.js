@@ -13,6 +13,14 @@ function fmt(n) {
   if (n == null || isNaN(n)) return '—';
   return Math.round(n).toLocaleString('en-US');
 }
+// Auctions bid in tokens, but showing raw token amounts next to dollar-denominated market values
+// was confusing (they're ~10x apart and easy to mix up at a glance) -- convert everything to
+// dollars for display using the live $->tokens rate (falls back to the confirmed 10:1 rate).
+function usd(tokens) {
+  if (tokens == null || isNaN(tokens)) return '—';
+  const rate = state.fx?.rate || 10;
+  return '$' + fmt(tokens / rate);
+}
 function timeLeft(iso) {
   const ms = new Date(iso).getTime() - Date.now();
   if (ms <= 0) return 'ended';
@@ -109,17 +117,16 @@ function renderStats() {
     : null;
 
   const cards = [
-    { label: 'Tokens balance', value: fmt(tokens), sub: state.me?.error ? 'fetch error' : '' },
-    { label: 'Held (worst-case)', value: fmt(held), sub: 'autobids counted at their ceiling, not current bid' },
-    { label: 'Free tokens', value: fmt(free), sub: '' },
-    { label: 'Session committed', value: `${fmt(committed)} / ${fmt(cap)}`, sub: 'new commitments this run' },
+    { label: 'Balance', value: usd(tokens), sub: state.me?.error ? 'fetch error' : '' },
+    { label: 'Held (worst-case)', value: usd(held), sub: 'autobids counted at their ceiling, not current bid' },
+    { label: 'Free balance', value: usd(free), sub: '' },
+    { label: 'Session committed', value: `${usd(committed)} / ${usd(cap)}`, sub: 'new commitments this run' },
     { label: 'Tracked auctions', value: fmt(state.auctions.length), sub: '' },
     { label: 'Bids placed', value: fmt(s.bidsPlaced || 0), sub: '' },
     { label: 'Autobids set', value: fmt(s.autobidsSet || 0), sub: '' },
     { label: 'Won / Lost', value: `${fmt(s.won || 0)} / ${fmt(s.lost || 0)}`, sub: winRate != null ? `${winRate}% win rate` : '' },
     { label: 'Avg. discount on wins', value: avgDiscount != null ? `${avgDiscount}%` : '—', sub: 'vs. market value' },
     { label: 'Pricedata sheet', value: state.priceData?.ready ? 'loaded' : 'loading…', sub: state.priceData?.lastLoadedAt ? new Date(state.priceData.lastLoadedAt).toLocaleTimeString() : '' },
-    { label: '$→tokens rate', value: state.fx?.rate ? `${state.fx.rate.toFixed(2)}/$` : '—', sub: state.fx ? `${state.fx.source} (${state.fx.sampleCount}${state.fx.need ? '/' + state.fx.need : ''} samples)` : '' },
   ];
   grid.innerHTML = cards.map((c) => `
     <div class="stat"><div class="label">${c.label}</div><div class="value">${c.value}</div><div class="sub">${c.sub || ''}</div></div>
@@ -143,7 +150,7 @@ function sortedAuctions() {
     case 'favorite':
       return list.sort((a, b) => (b.isFavorite - a.isFavorite) || (new Date(a.expiresAt) - new Date(b.expiresAt)));
     case 'marketValue':
-      return list.sort((a, b) => (b.marketValueTokens || 0) - (a.marketValueTokens || 0));
+      return list.sort((a, b) => (b.marketValueDollars || 0) - (a.marketValueDollars || 0));
     case 'discount':
       return list.sort((a, b) => discountPct(b) - discountPct(a));
     case 'bidCount':
@@ -168,39 +175,111 @@ async function quickAutobid(id, pct, btn) {
   }
 }
 
+function marketValueCellHtml(a) {
+  if (a.marketValueDollars != null) return `$${fmt(a.marketValueDollars)}`;
+  return a.valuationConfidence === 'uncalibrated' ? 'set $→tokens rate' : (a.valuationConfidence || '—');
+}
+
+function quickActionsCellHtml(a) {
+  const canAct = !a.isLeading && !a.cooldown && a.marketValueTokens != null && a.status === 'active' && !a.isLocked;
+  if (!canAct) return a.marketValueTokens == null && !a.isLeading && !a.cooldown ? '<span class="hint">no token value yet</span>' : '';
+  return [20, 50, 100].map((pct) => `<button class="small qa-btn" data-id="${a.id}" data-pct="${pct}">${pct}%</button>`).join(' ');
+}
+
+// Rows are keyed by auction id and updated in place rather than rebuilt via innerHTML on every
+// update -- rebuilding the whole table on every socket push (which can arrive several times a
+// second on a live auction house) destroyed and recreated the quick-action buttons out from under
+// whatever the user was about to click, and made the list visibly jump.
+const auctionRows = new Map(); // id -> <tr>
+
+function buildRow(a) {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td class="cell-skin"></td>
+    <td class="mono cell-currentBid"></td>
+    <td class="mono cell-minNext"></td>
+    <td class="mono cell-marketValue"></td>
+    <td class="mono cell-bidCount"></td>
+    <td class="mono cell-timeLeft"></td>
+    <td class="cell-decision"></td>
+    <td class="cell-actions"></td>
+  `;
+  updateRow(tr, a, { actions: true });
+  return tr;
+}
+
+function updateRow(tr, a, opts = {}) {
+  const decision = a.lastDecision;
+  const verdict = decision?.verdict || 'pending';
+  const skinName = `${a.statTrak ? 'StatTrak™ ' : ''}${a.name || '?'}${a.exterior ? ` (${a.exterior})` : ''}`;
+  const iconSrc = a.iconUrl ? (a.iconUrl.startsWith('http') ? a.iconUrl : `https://case-clicker.com/pictures/skins/${a.iconUrl}`) : null;
+  const skinHtml = `${iconSrc ? `<img class="icon" src="${iconSrc}" onerror="this.style.display='none'">` : ''} ${a.isFavorite ? '★ ' : ''}<a href="https://case-clicker.com/auctions/${a.id}" target="_blank" rel="noopener">${skinName}</a>
+    ${a.isLeading ? '<span class="tag leading">LEADING</span>' : ''}
+    ${a.cooldown ? '<span class="tag skip">cooldown</span>' : ''}`;
+  setHtmlIfChanged(tr.querySelector('.cell-skin'), skinHtml);
+  setHtmlIfChanged(tr.querySelector('.cell-currentBid'), usd(a.currentBid));
+  setHtmlIfChanged(tr.querySelector('.cell-minNext'), usd(a.minNextBid));
+  setHtmlIfChanged(tr.querySelector('.cell-marketValue'), marketValueCellHtml(a));
+  setHtmlIfChanged(tr.querySelector('.cell-bidCount'), fmt(a.bidCount));
+  tr.querySelector('.cell-timeLeft').textContent = timeLeft(a.expiresAt);
+  setHtmlIfChanged(tr.querySelector('.cell-decision'), `<span class="tag ${verdict}">${verdict}</span><div class="decision-reason">${decision?.reason || ''}</div>`);
+  // Quick-action buttons: only rebuilt when what they'd do actually changes (canAct flips, or the
+  // auction id changes on a reused row), so a button never disappears mid-click.
+  const actionsKey = `${a.id}:${!a.isLeading && !a.cooldown && a.marketValueTokens != null && a.status === 'active' && !a.isLocked}`;
+  if (opts.actions || tr.dataset.actionsKey !== actionsKey) {
+    tr.dataset.actionsKey = actionsKey;
+    const cell = tr.querySelector('.cell-actions');
+    cell.innerHTML = quickActionsCellHtml(a);
+    cell.querySelectorAll('.qa-btn').forEach((btn) => {
+      btn.addEventListener('click', () => quickAutobid(btn.dataset.id, Number(btn.dataset.pct), btn));
+    });
+  }
+}
+
+function setHtmlIfChanged(el, html) {
+  if (el.__lastHtml !== html) { el.innerHTML = html; el.__lastHtml = html; }
+}
+
 function renderAuctions() {
   const body = document.getElementById('auctionsBody');
   const empty = document.getElementById('auctionsEmpty');
-  if (!state.auctions.length) {
+  const list = sortedAuctions();
+
+  if (!list.length) {
     body.innerHTML = '';
+    auctionRows.clear();
     empty.style.display = 'block';
     return;
   }
   empty.style.display = 'none';
-  body.innerHTML = sortedAuctions().map((a) => {
-    const decision = a.lastDecision;
-    const verdict = decision?.verdict || 'pending';
-    const skinName = `${a.statTrak ? 'StatTrak™ ' : ''}${a.name || '?'}${a.exterior ? ` (${a.exterior})` : ''}`;
-    const canAct = !a.isLeading && !a.cooldown && a.marketValueTokens != null && a.status === 'active' && !a.isLocked;
-    return `<tr>
-      <td>${a.iconUrl ? `<img class="icon" src="https://case-clicker.com/pictures/skins/${a.iconUrl}" onerror="this.style.display='none'">` : ''} ${a.isFavorite ? '★ ' : ''}${skinName}
-        ${a.isLeading ? '<span class="tag leading">LEADING</span>' : ''}
-        ${a.cooldown ? '<span class="tag skip">cooldown</span>' : ''}
-      </td>
-      <td class="mono">${fmt(a.currentBid)}</td>
-      <td class="mono">${fmt(a.minNextBid)}</td>
-      <td class="mono">${a.marketValueTokens != null ? fmt(a.marketValueTokens) : (a.valuationConfidence || '—')}</td>
-      <td class="mono">${fmt(a.bidCount)}</td>
-      <td class="mono">${timeLeft(a.expiresAt)}</td>
-      <td><span class="tag ${verdict}">${verdict}</span><div class="decision-reason">${decision?.reason || ''}</div></td>
-      <td>${canAct ? [20, 50, 100].map((pct) => `<button class="small qa-btn" data-id="${a.id}" data-pct="${pct}">${pct}%</button>`).join(' ') : ''}</td>
-    </tr>`;
-  }).join('');
-  body.querySelectorAll('.qa-btn').forEach((btn) => {
-    btn.addEventListener('click', () => quickAutobid(btn.dataset.id, Number(btn.dataset.pct), btn));
+
+  const seen = new Set();
+  list.forEach((a, index) => {
+    seen.add(a.id);
+    let tr = auctionRows.get(a.id);
+    if (!tr) {
+      tr = buildRow(a);
+      auctionRows.set(a.id, tr);
+    } else {
+      updateRow(tr, a);
+    }
+    const current = body.children[index];
+    if (current !== tr) body.insertBefore(tr, current || null);
   });
+
+  for (const [id, tr] of auctionRows) {
+    if (!seen.has(id)) { tr.remove(); auctionRows.delete(id); }
+  }
 }
-setInterval(() => { if (state.auctions.length) renderAuctions(); }, 1000);
+
+// Countdown text updates on its own timer without touching anything else (no re-sort, no cell
+// diffing) so it can't interfere with a table structure update mid-interaction.
+setInterval(() => {
+  for (const [id, tr] of auctionRows) {
+    const a = state.auctions.find((x) => x.id === id);
+    if (a) tr.querySelector('.cell-timeLeft').textContent = timeLeft(a.expiresAt);
+  }
+}, 1000);
 
 document.getElementById('sortModeSelect').addEventListener('change', (e) => { state.sortMode = e.target.value; renderAuctions(); });
 document.getElementById('refreshAuctionsBtn').addEventListener('click', async (e) => {
