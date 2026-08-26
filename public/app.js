@@ -9,6 +9,7 @@ const state = {
   sortMode: 'timeLeft',
   ruleStats: {},
   categories: { weaponTypes: [], rarities: [] },
+  history: [],
 };
 
 function fmt(n) {
@@ -69,11 +70,13 @@ function connectWs() {
     } else if (type === 'auctions') {
       state.auctions = payload;
       renderAuctions();
+      renderHoldings();
     } else if (type === 'log') {
       appendLog(payload);
     } else if (type === 'ledger') {
       state.ledger = payload;
       renderStats();
+      renderBudget();
     } else if (type === 'stats') {
       state.stats = payload;
       renderStats();
@@ -97,6 +100,11 @@ function connectWs() {
     } else if (type === 'ruleStats') {
       state.ruleStats = payload;
       renderRules();
+      renderBudget();
+    } else if (type === 'historyPoint') {
+      state.history.push(payload);
+      if (state.history.length > 480) state.history.shift();
+      renderBudget();
     }
   };
 }
@@ -132,24 +140,32 @@ function renderStats() {
   const tokens = state.me?.data?.tokens;
   const held = state.ledger?.totalHeld || 0;
   const free = tokens != null ? tokens - held : null;
-  const cap = state.settings?.limits?.sessionSpendCap;
-  const committed = state.ledger?.sessionCommitted || 0;
+  const allocation = state.settings?.limits?.allocation;
+  const lifetimeCommitted = state.ledger?.sessionCommitted || 0;
   const s = state.stats || {};
   const winRate = (s.won || 0) + (s.lost || 0) > 0 ? Math.round((100 * (s.won || 0)) / ((s.won || 0) + (s.lost || 0))) : null;
   const avgDiscount = s.totalMarketValueOnWins > 0
     ? Math.round(100 * (1 - s.totalSpentOnWins / s.totalMarketValueOnWins))
     : null;
+  const realizedPnl = (s.totalMarketValueOnWins || 0) - (s.totalSpentOnWins || 0);
+
+  const active = state.auctions.filter((a) => a.status === 'active');
+  const leading = active.filter((a) => a.isLeading);
+  const totalActiveVolume = active.reduce((sum, a) => sum + (a.currentBid || 0), 0);
+  const myVolume = leading.reduce((sum, a) => sum + (a.currentBid || 0), 0);
+  const marketSharePct = totalActiveVolume > 0 ? (100 * myVolume) / totalActiveVolume : 0;
 
   const cards = [
     { label: 'Balance', value: usd(tokens), sub: state.me?.error ? 'fetch error' : '' },
-    { label: 'Held (worst-case)', value: usd(held), sub: 'autobids counted at their ceiling, not current bid' },
+    { label: 'At risk (held)', value: usd(held), sub: 'auctions currently leading, at their ceiling' },
     { label: 'Free balance', value: usd(free), sub: '' },
-    { label: 'Session committed', value: `${usd(committed)} / ${usd(cap)}`, sub: 'new commitments this run' },
-    { label: 'Tracked auctions', value: fmt(state.auctions.length), sub: '' },
-    { label: 'Bids placed', value: fmt(s.bidsPlaced || 0), sub: '' },
-    { label: 'Autobids set', value: fmt(s.autobidsSet || 0), sub: '' },
+    { label: 'Bot allocation', value: `${usd(held)} / ${usd(allocation)}`, sub: `${usd(lifetimeCommitted)} committed lifetime this run` },
+    { label: 'Winning', value: `${fmt(leading.length)} / ${fmt(active.length)}`, sub: 'of currently tracked active auctions' },
+    { label: 'Market share', value: `${marketSharePct.toFixed(1)}%`, sub: 'my leading bids vs. total tracked bid volume' },
+    { label: 'Realized P&L', value: usd(realizedPnl), sub: `${fmt(s.won || 0)} won, market value vs. paid` },
     { label: 'Won / Lost', value: `${fmt(s.won || 0)} / ${fmt(s.lost || 0)}`, sub: winRate != null ? `${winRate}% win rate` : '' },
     { label: 'Avg. discount on wins', value: avgDiscount != null ? `${avgDiscount}%` : '—', sub: 'vs. market value' },
+    { label: 'Bids placed / Autobids set', value: `${fmt(s.bidsPlaced || 0)} / ${fmt(s.autobidsSet || 0)}`, sub: '' },
     { label: 'Pricedata sheet', value: state.priceData?.ready ? 'loaded' : 'loading…', sub: state.priceData?.lastLoadedAt ? new Date(state.priceData.lastLoadedAt).toLocaleTimeString() : '' },
   ];
   grid.innerHTML = cards.map((c) => `
@@ -160,6 +176,101 @@ function renderStats() {
   document.getElementById('dryPill').textContent = state.settings?.dryRun ? 'DRY RUN' : 'LIVE — placing real bids';
   document.getElementById('startBtn').disabled = state.running;
   document.getElementById('stopBtn').disabled = !state.running;
+}
+
+// ---------- render: current holdings (auctions we're leading) ----------
+function renderHoldings() {
+  const body = document.getElementById('holdingsBody');
+  const empty = document.getElementById('holdingsEmpty');
+  const summary = document.getElementById('holdingsSummary');
+  const holdings = state.auctions.filter((a) => a.isLeading);
+  if (!holdings.length) {
+    body.innerHTML = '';
+    summary.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+
+  const rate = state.fx?.rate || 10;
+  const valued = holdings.filter((a) => a.marketValueDollars != null);
+  const pnls = valued.map((a) => ({ a, pnl: a.marketValueDollars - a.currentBid / rate }));
+  const totalUnrealized = pnls.reduce((sum, p) => sum + p.pnl, 0);
+  const best = pnls.length ? pnls.reduce((m, p) => (p.pnl > m.pnl ? p : m)) : null;
+  const worst = pnls.length ? pnls.reduce((m, p) => (p.pnl < m.pnl ? p : m)) : null;
+  summary.innerHTML = [
+    { label: 'Unrealized P&L', value: `$${fmt(totalUnrealized)}`, sub: `across ${valued.length} valued holding(s)` },
+    { label: 'Best position', value: best ? `$${fmt(best.pnl)}` : '—', sub: best ? best.a.name : '' },
+    { label: 'Worst position', value: worst ? `$${fmt(worst.pnl)}` : '—', sub: worst ? worst.a.name : '' },
+  ].map((c) => `<div class="stat"><div class="label">${c.label}</div><div class="value">${c.value}</div><div class="sub">${c.sub || ''}</div></div>`).join('');
+
+  body.innerHTML = holdings.map((a) => {
+    const skinName = `${a.statTrak ? 'StatTrak™ ' : ''}${a.name || '?'}${a.exterior ? ` (${a.exterior})` : ''}`;
+    const discount = a.marketValueTokens ? Math.round(100 * (1 - a.currentBid / a.marketValueTokens)) : null;
+    const type = a.hasAutobid ? `autobid (up to ${usd(a.autobidMax)})` : 'fixed bid';
+    return `<tr>
+      <td><a href="https://case-clicker.com/auctions/${a.id}" target="_blank" rel="noopener">${a.isFavorite ? '★ ' : ''}${skinName}</a></td>
+      <td class="mono">${usd(a.currentBid)}</td>
+      <td class="mono">${a.marketValueDollars != null ? '$' + fmt(a.marketValueDollars) : '—'}</td>
+      <td class="mono">${discount != null ? discount + '%' : '—'}</td>
+      <td class="mono">${timeLeft(a.expiresAt)}</td>
+      <td>${type}</td>
+    </tr>`;
+  }).join('');
+}
+setInterval(() => { if (state.auctions.some((a) => a.isLeading)) renderHoldings(); }, 1000);
+
+// ---------- render: budget bars + history chart ----------
+function renderBudget() {
+  const allocation = state.settings?.limits?.allocation || 0;
+  const held = state.ledger?.totalHeld || 0;
+  const pct = allocation > 0 ? Math.min(100, (held / allocation) * 100) : 0;
+  const fill = document.getElementById('budgetCapFill');
+  fill.style.width = pct + '%';
+  fill.className = 'budget-bar-fill' + (pct >= 90 ? ' danger' : pct >= 60 ? ' warn' : '');
+  document.getElementById('budgetCapText').textContent = `${usd(held)} at risk / ${usd(allocation)} allocated (${Math.round(pct)}%)`;
+
+  const rulesWithBudget = [...(state.settings?.rules || []), { id: 'default', name: 'Default rule', ...state.settings?.defaultRule }]
+    .filter((r) => r.maxTotalSpend);
+  document.getElementById('ruleBudgetBars').innerHTML = rulesWithBudget.map((r) => {
+    const s = (state.ruleStats && state.ruleStats[r.id]) || { totalSpentTokens: 0 };
+    const p = Math.min(100, (s.totalSpentTokens / r.maxTotalSpend) * 100);
+    return `<div class="budget-bar-row">
+      <div class="budget-bar-label"><span>${r.name || r.id}</span><span>${usd(s.totalSpentTokens)} / ${usd(r.maxTotalSpend)} (${Math.round(p)}%)</span></div>
+      <div class="budget-bar"><div class="budget-bar-fill${p >= 90 ? ' danger' : p >= 60 ? ' warn' : ''}" style="width:${p}%"></div></div>
+    </div>`;
+  }).join('');
+
+  renderHistoryChart();
+}
+
+function renderHistoryChart() {
+  const el = document.getElementById('historyChart');
+  const pts = state.history;
+  if (pts.length < 2) { el.innerHTML = '<div class="hint">Chart fills in as the app runs (one sample every 30s).</div>'; return; }
+
+  const W = 900, H = 140, PAD = 8;
+  const rate = state.fx?.rate || 10;
+  const committedSeries = pts.map((p) => (p.sessionCommittedTokens || 0) / rate);
+  const heldSeries = pts.map((p) => (p.heldTokens || 0) / rate);
+  const maxY = Math.max(1, ...committedSeries, ...heldSeries);
+
+  const toPath = (series) => series.map((v, i) => {
+    const x = PAD + (i / (series.length - 1)) * (W - 2 * PAD);
+    const y = H - PAD - (v / maxY) * (H - 2 * PAD);
+    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+
+  el.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <path d="${toPath(heldSeries)}" fill="none" stroke="#4c9aff" stroke-width="2" />
+      <path d="${toPath(committedSeries)}" fill="none" stroke="#e07b39" stroke-width="2" />
+    </svg>
+    <div class="chart-legend">
+      <span><span class="dotline" style="background:#e07b39"></span>Committed ($)</span>
+      <span><span class="dotline" style="background:#4c9aff"></span>Held ($)</span>
+      <span>last ${pts.length} samples, ~${Math.round((pts.length * 30) / 60)} min</span>
+    </div>`;
 }
 
 // ---------- render: auctions ----------
@@ -350,7 +461,7 @@ function renderSettingsForm() {
   document.getElementById('requireValidToggle').checked = !!s.valuation.requireValid;
   document.getElementById('manualFxInput').value = s.valuation.manualTokensPerDollar ?? '';
   document.getElementById('minCalSamplesInput').value = s.valuation.minCalibrationSamples;
-  document.getElementById('spendCapInput').value = fromTokens(s.limits.sessionSpendCap);
+  document.getElementById('spendCapInput').value = fromTokens(s.limits.allocation);
   document.getElementById('maxTrackedInput').value = s.limits.maxConcurrentTracked;
   document.getElementById('defaultRuleEnabled').checked = !!s.defaultRule.enabled;
   document.getElementById('defaultThreshold').value = s.defaultRule.thresholdPct;
@@ -393,7 +504,7 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async (e) =
       minCalibrationSamples: Number(document.getElementById('minCalSamplesInput').value),
     },
     limits: {
-      sessionSpendCap: toTokens(Number(document.getElementById('spendCapInput').value)),
+      allocation: toTokens(Number(document.getElementById('spendCapInput').value)),
       maxConcurrentTracked: Number(document.getElementById('maxTrackedInput').value),
     },
   }, e.target);
@@ -445,11 +556,43 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
 });
 
 // ---------- render: rules ----------
+// renderRules() gets called from things that have nothing to do with what a rule *card* looks
+// like -- a categories refresh every 60s, a ruleStats update the moment any rule wins an auction.
+// Full-rebuilding every card's innerHTML on those was wiping out whatever the user was mid-typing
+// into a rule they hadn't saved yet (and, worse, silently reverting an already-clicked Save's
+// button back to a detached node before its "Saved" flash could show -- looked exactly like the
+// click did nothing). Only rebuild the DOM when the actual set/order of rules changed; otherwise
+// just refresh the bits that can go stale (dropdown option lists, the won/spent hint) in place.
 function renderRules() {
   const list = document.getElementById('rulesList');
   const rules = state.settings?.rules || [];
-  list.innerHTML = rules.map((r) => ruleCardHtml(r)).join('');
-  rules.forEach((r) => wireRuleCard(r.id));
+  const currentIds = [...list.children].map((el) => el.dataset.id);
+  const newIds = rules.map((r) => r.id);
+  const structuralChange = currentIds.length !== newIds.length || currentIds.some((id, i) => id !== newIds[i]);
+
+  if (structuralChange) {
+    list.innerHTML = rules.map((r) => ruleCardHtml(r)).join('');
+    rules.forEach((r) => wireRuleCard(r.id));
+  } else {
+    rules.forEach((r) => updateRuleCardCosmetics(r));
+  }
+}
+
+function updateRuleCardCosmetics(r) {
+  const card = document.querySelector(`.rule-card[data-id="${r.id}"]`);
+  if (!card) return;
+  const cats = state.categories || { weaponTypes: [], rarities: [] };
+  updateSelectOptionsPreservingValue(card.querySelector('.r-weaponType'), cats.weaponTypes);
+  updateSelectOptionsPreservingValue(card.querySelector('.r-rarity'), cats.rarities);
+  const hint = card.querySelector('.hint');
+  if (hint) hint.textContent = ruleStatsHint(r);
+}
+
+function updateSelectOptionsPreservingValue(sel, values) {
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = optionsHtml(values, current);
+  sel.value = current; // no-op if current isn't in the refreshed list -- falls back to "(any)"
 }
 
 const EXTERIORS = ['Factory New', 'Minimal Wear', 'Field-Tested', 'Well-Worn', 'Battle-Scarred'];
@@ -479,6 +622,8 @@ function ruleCardHtml(r) {
       <div><label>Exterior</label><select class="r-exterior">${optionsHtml(EXTERIORS, m.exterior)}</select></div>
       <div><label>StatTrak</label>${triStateHtml('r-statTrak', m.statTrak)}</div>
       <div><label>Souvenir</label>${triStateHtml('r-souvenir', m.souvenir)}</div>
+      <div><label>Event skin</label>${triStateHtml('r-isEvent', m.isEvent)}</div>
+      <div><label>1/1 (lowest+highest float)</label>${triStateHtml('r-isOneOfOne', m.isOneOfOne)}</div>
     </div>
     <div class="match-grid">
       <div><label>Threshold % of market value (act if min next bid ≤ this)</label><input type="number" class="r-thresholdPct" value="${r.thresholdPct}"></div>
@@ -493,8 +638,9 @@ function ruleCardHtml(r) {
 }
 
 function ruleStatsHint(r) {
-  const s = (state.ruleStats && state.ruleStats[r.id]) || { itemsWon: 0, totalSpentTokens: 0 };
-  const parts = [`${s.itemsWon} won so far`, `${usd(s.totalSpentTokens)} spent so far`];
+  const s = (state.ruleStats && state.ruleStats[r.id]) || { itemsWon: 0, totalSpentTokens: 0, totalMarketValueTokens: 0 };
+  const pnl = (s.totalMarketValueTokens || 0) - (s.totalSpentTokens || 0);
+  const parts = [`${s.itemsWon} won so far`, `${usd(s.totalSpentTokens)} spent`, `P&L ${usd(pnl)}`];
   if (r.maxItemsToWin) parts.push(`${Math.max(0, r.maxItemsToWin - s.itemsWon)} more allowed`);
   if (r.maxTotalSpend) parts.push(`${usd(Math.max(0, r.maxTotalSpend - s.totalSpentTokens))} budget left`);
   return parts.join(' · ');
@@ -523,10 +669,16 @@ function wireRuleCard(id) {
         exterior: g('r-exterior') || undefined,
         statTrak: parseBool(g('r-statTrak')),
         souvenir: parseBool(g('r-souvenir')),
+        isEvent: parseBool(g('r-isEvent')),
+        isOneOfOne: parseBool(g('r-isOneOfOne')),
       },
     };
     await fetch(`/api/rules/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-    flashSaved(e.target);
+    // e.target can be a detached node if a structural rules-list change (add/remove elsewhere)
+    // raced this save and rebuilt the DOM while the request was in flight -- re-find the current
+    // button for this rule id rather than trusting the closure reference.
+    const freshBtn = document.querySelector(`.rule-card[data-id="${id}"] .r-save`);
+    if (freshBtn) flashSaved(freshBtn);
   });
 }
 
@@ -545,6 +697,8 @@ document.getElementById('addRuleBtn').addEventListener('click', async () => {
 function renderAll() {
   renderStats();
   renderAuctions();
+  renderHoldings();
+  renderBudget();
   renderSettingsForm();
   renderRules();
   renderLog();

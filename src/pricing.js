@@ -83,6 +83,16 @@ function getFloatRanks(skin) {
   return skin.floatRanks ? Object.values(skin.floatRanks) : [];
 }
 
+/** "1/1": lowest-float AND highest-float instance for its pattern/skingroup within an event --
+ * no other copy can hold both extremes. Same index positions calcDollarPrice's 1/1 bonus uses
+ * below (18/19 for pattern skins, 6/7 for non-pattern), exported so rule matching can filter on
+ * it without duplicating the float-rank indexing logic. */
+export function isOneOfOne(skin) {
+  const ranks = getFloatRanks(skin);
+  if (skin.patternId) return ranks[18] === 1 && ranks[19] === 1;
+  return ranks[6] === 1 && ranks[7] === 1;
+}
+
 class PriceDataService {
   constructor() {
     this.priceDataByName = new Map();

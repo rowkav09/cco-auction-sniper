@@ -26,6 +26,32 @@
 
   <section class="stats-grid" id="statsGrid"></section>
 
+  <section class="panel" id="budgetPanel">
+    <div class="panel-header" data-toggle="budgetPanel"><h2>Budget</h2><span class="chevron">▾</span></div>
+    <div class="panel-body">
+      <div class="budget-bar-row">
+        <div class="budget-bar-label"><span>Bot allocation (at risk / allocated)</span><span id="budgetCapText">—</span></div>
+        <div class="budget-bar"><div class="budget-bar-fill" id="budgetCapFill"></div></div>
+      </div>
+      <div id="ruleBudgetBars"></div>
+      <div id="historyChart"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="holdingsPanel">
+    <div class="panel-header" data-toggle="holdingsPanel"><h2>Current holdings (pending bids)</h2><span class="chevron">▾</span></div>
+    <div class="panel-body">
+      <div class="stats-grid" id="holdingsSummary"></div>
+      <table>
+        <thead>
+          <tr><th>Skin</th><th>Your bid</th><th>Market value</th><th>Discount</th><th>Time left</th><th>Type</th></tr>
+        </thead>
+        <tbody id="holdingsBody"></tbody>
+      </table>
+      <div class="empty" id="holdingsEmpty" style="display:none">Not currently leading any tracked auction.</div>
+    </div>
+  </section>
+
   <section class="panel" id="settingsPanel">
     <div class="panel-header" data-toggle="settingsPanel"><h2>Settings</h2><span class="chevron">▾</span></div>
     <div class="panel-body">
@@ -97,10 +123,10 @@
 
       <div class="form-row stack"><label>Limits</label></div>
       <div class="form-row">
-        <label>Session spend cap ($)</label>
+        <label>Bot allocation ($)</label>
         <input id="spendCapInput" type="number" min="0" step="100" />
       </div>
-      <div class="hint">Hard stop on cumulative NEW token commitments since this process started. Resets on restart. Keep this low until you trust your rules.</div>
+      <div class="hint">How much the bot is allowed to have at risk at once. Gated against what's currently held (auctions you're actively leading), not a lifetime total -- being outbid releases the hold immediately, same as it does on the real site, so this number reflects live exposure rather than growing forever.</div>
       <div class="form-row">
         <label>Max tracked auctions</label>
         <input id="maxTrackedInput" type="number" min="10" step="10" />

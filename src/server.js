@@ -10,6 +10,7 @@ import { priceData, getTokensPerDollar } from './pricing.js';
 import { sniper } from './sniper.js';
 import { browserSession } from './browserSession.js';
 import { startTray } from './tray.js';
+import { history } from './history.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -51,7 +52,19 @@ function fullState() {
     auctions: sniper.snapshot(),
     log: store.recentLog(200),
     categories: sniper.knownCategories(),
+    history: history.points,
   };
+}
+
+function sampleHistory() {
+  history.record({
+    balanceTokens: meCache.data?.tokens ?? null,
+    heldTokens: store.totalHeld(),
+    sessionCommittedTokens: store.runtime.ledger.sessionCommitted || 0,
+    trackedAuctions: sniper.auctions.size,
+    won: store.runtime.stats.won,
+    lost: store.runtime.stats.lost,
+  });
 }
 
 app.get('/api/state', (req, res) => res.json(fullState()));
@@ -148,11 +161,15 @@ store.onChange((type, payload) => {
   if (type === 'ruleStats') { broadcast('ruleStats', payload); return; }
   if (type === 'settings') { broadcast('settings', store.settings); return; }
   if (type === 'me') { broadcast('me', payload); return; }
+  if (type === 'historyPoint') { broadcast('historyPoint', payload); return; }
 });
 
 setInterval(() => broadcast('browser', browserStatus()), 5000);
 
 setInterval(() => broadcast('fx', getTokensPerDollar()), 15000);
+
+setInterval(sampleHistory, 30000);
+sampleHistory();
 
 const PORT = store.settings.port || 8934;
 server.listen(PORT, () => {

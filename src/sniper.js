@@ -2,7 +2,7 @@ import { store } from './store.js';
 import { listAuctions } from './ccoRest.js';
 import { ccoSocket } from './ccoSocket.js';
 import { browserSession } from './browserSession.js';
-import { valuateAuction, invalidateHistoryCache } from './pricing.js';
+import { valuateAuction, invalidateHistoryCache, isOneOfOne } from './pricing.js';
 
 // Reverse-engineered from case-clicker.com's client bundle (module 10893 in the auction detail
 // page chunk). Increment is 10% of the current bid (1% once the bid crosses 1e9), floored at 1.
@@ -34,6 +34,8 @@ function ruleMatches(match, skin) {
   if (match.exterior && skin.exterior !== match.exterior) return false;
   if (match.statTrak != null && match.statTrak !== '' && !!skin.statTrak !== !!match.statTrak) return false;
   if (match.souvenir != null && match.souvenir !== '' && !!skin.souvenir !== !!match.souvenir) return false;
+  if (match.isEvent != null && match.isEvent !== '' && !!skin.event !== !!match.isEvent) return false;
+  if (match.isOneOfOne != null && match.isOneOfOne !== '' && isOneOfOne(skin) !== !!match.isOneOfOne) return false;
   return true;
 }
 
@@ -61,11 +63,16 @@ class Sniper {
   constructor() {
     this.auctions = new Map(); // auctionId -> auction doc (as last known)
     this.ownedByUs = new Map(); // auctionId -> { amount, rule, marketValueTokens } our active commitments
+    // CCO's REST /api/auctions responses don't reliably carry the autobids array back (confirmed
+    // empty even right after a just-confirmed autobid), so track our own autobid registrations
+    // locally off the socket confirmations instead of trying to read them back from auction data.
+    this.myAutobids = new Map(); // auctionId -> maxBid
     this.ourUserId = null;
     this._running = false;
     this._discoveryTimers = [];
     this._snipeTicker = null;
     this._listeners = [];
+    this._spendCapWarned = new Map(); // auctionId -> last time we logged a spend-cap skip for it
   }
 
   /** Coalesces bursts of updates (a live auction house can push several auctionUpdated events a
@@ -107,32 +114,37 @@ class Sniper {
   }
 
   snapshot() {
-    return [...this.auctions.values()].map((a) => ({
-      id: a._id,
-      name: a.auctionedSkinId?.name,
-      statTrak: a.auctionedSkinId?.statTrak,
-      exterior: a.auctionedSkinId?.exterior,
-      rarity: a.auctionedSkinId?.rarity,
-      iconUrl: a.auctionedSkinId?.iconUrl,
-      currentBid: a.currentBid,
-      startingPrice: a.startingPrice,
-      minNextBid: minNextBid(a.currentBid, a.startingPrice),
-      bidCount: a.bidCount ?? a.bids?.length ?? 0,
-      expiresAt: a.expiresAt,
-      status: a.status,
-      isLocked: a.isLocked,
-      currentBidder: a.currentBidder,
-      isLeading: a.currentBidder === this.ourUserId,
-      consecutiveBidCount: a.consecutiveBidCount || 0,
-      sellerName: a.seller?.name,
-      lastDecision: a._decision || null,
-      marketValueTokens: a._marketValueTokens ?? null,
-      marketValueDollars: a._marketValueDollars ?? null,
-      fxSource: a._fxSource ?? null,
-      valuationConfidence: a._valuationConfidence ?? null,
-      cooldown: store.isOnCooldown(a._id),
-      isFavorite: isFavoriteSkin(a.auctionedSkinId),
-    })).sort((x, y) => new Date(x.expiresAt) - new Date(y.expiresAt));
+    return [...this.auctions.values()].map((a) => {
+      const myAutobidMax = this.myAutobids.get(a._id) ?? null;
+      return {
+        id: a._id,
+        name: a.auctionedSkinId?.name,
+        statTrak: a.auctionedSkinId?.statTrak,
+        exterior: a.auctionedSkinId?.exterior,
+        rarity: a.auctionedSkinId?.rarity,
+        iconUrl: a.auctionedSkinId?.iconUrl,
+        currentBid: a.currentBid,
+        startingPrice: a.startingPrice,
+        minNextBid: minNextBid(a.currentBid, a.startingPrice),
+        bidCount: a.bidCount ?? a.bids?.length ?? 0,
+        expiresAt: a.expiresAt,
+        status: a.status,
+        isLocked: a.isLocked,
+        currentBidder: a.currentBidder,
+        isLeading: a.currentBidder === this.ourUserId,
+        consecutiveBidCount: a.consecutiveBidCount || 0,
+        sellerName: a.seller?.name,
+        lastDecision: a._decision || null,
+        marketValueTokens: a._marketValueTokens ?? null,
+        marketValueDollars: a._marketValueDollars ?? null,
+        fxSource: a._fxSource ?? null,
+        valuationConfidence: a._valuationConfidence ?? null,
+        cooldown: store.isOnCooldown(a._id),
+        isFavorite: isFavoriteSkin(a.auctionedSkinId),
+        hasAutobid: myAutobidMax != null,
+        autobidMax: myAutobidMax,
+      };
+    }).sort((x, y) => new Date(x.expiresAt) - new Date(y.expiresAt));
   }
 
   async start() {
@@ -188,12 +200,24 @@ class Sniper {
     on('bidRejected', (p) => this._onFailure(p, 'bid rejected'));
     on('outbid', (p) => {
       store.log('info', `outbid on ${p?.auctionId || '?'}`, p);
+      // CCO releases held tokens the instant you're outbid (that's what "held until someone
+      // outbids you" on the auction page means) -- mirror that immediately rather than leaving
+      // the held amount counted until the auction eventually ends. If we're still in this via an
+      // autobid and it re-takes the lead, _executeAutobid sets it right back on the next
+      // evaluation below; if not, the budget now correctly reflects that this money isn't at
+      // risk here anymore.
+      if (p?.auctionId) store.setHeld(p.auctionId, 0);
       const a = this.auctions.get(p?.auctionId);
       if (a) this.evaluateAuction(a).catch((e) => store.log('error', `re-evaluate after outbid failed: ${e.message}`));
     });
     on('autobidFailed', (p) => this._onFailure(p, 'autobid failed'));
-    on('autobidSet', (p) => store.log('info', `autobid confirmed on ${p?.auctionId || '?'}`, p));
-    on('autobidRemoved', (p) => { if (p?.auctionId) { this.ownedByUs.delete(p.auctionId); store.setHeld(p.auctionId, 0); } });
+    on('autobidSet', (p) => {
+      store.log('info', `autobid confirmed on ${p?.auctionId || '?'}`, p);
+      if (p?.auctionId && p?.maxBid != null) this.myAutobids.set(p.auctionId, p.maxBid);
+    });
+    on('autobidRemoved', (p) => {
+      if (p?.auctionId) { this.ownedByUs.delete(p.auctionId); this.myAutobids.delete(p.auctionId); store.setHeld(p.auctionId, 0); }
+    });
     on('auctionError', (p) => this._onFailure(p, 'auction error'));
   }
 
@@ -243,7 +267,7 @@ class Sniper {
     const owned = this.ownedByUs.get(id);
     if (owned || wonByUs) {
       store.recordOutcome({ won: !!wonByUs, spent: wonByUs ? payload.finalPrice : 0, marketValue: owned?.marketValueTokens });
-      if (wonByUs && owned?.ruleId) store.recordRuleWin(owned.ruleId, payload.finalPrice);
+      if (wonByUs && owned?.ruleId) store.recordRuleWin(owned.ruleId, payload.finalPrice, owned.marketValueTokens);
       store.log(wonByUs ? 'info' : 'info', wonByUs ? `WON auction: ${skinLabel(this.auctions.get(id)?.auctionedSkinId)} for ${payload.finalPrice} tokens` : `lost auction we were tracking: ${skinLabel(this.auctions.get(id)?.auctionedSkinId)}`, payload);
     }
     this._onAuctionRemoved(payload, 'ended');
@@ -254,6 +278,7 @@ class Sniper {
     if (!id) return;
     this.auctions.delete(id);
     this.ownedByUs.delete(id);
+    this.myAutobids.delete(id);
     store.setHeld(id, 0);
     this.broadcastState();
   }
@@ -398,10 +423,23 @@ class Sniper {
     }
 
     const projected = strategy === 'autobid' ? maxBid : minNext;
-    const sessionCommitted = store.runtime.ledger.sessionCommitted || 0;
-    if (sessionCommitted + projected > store.settings.limits.sessionSpendCap) {
-      auction._decision = { verdict: 'skip', reason: `would exceed session spend cap (${fmt(store.settings.limits.sessionSpendCap)} tokens)`, at: Date.now(), rule: rule.name || rule.id };
-      store.log('warn', `session spend cap reached, skipping ${skinLabel(skin)}`);
+    // Gate on what's actually AT RISK right now (current holds), not the lifetime sum of every
+    // commitment ever made -- that sum never goes back down even after being outbid releases the
+    // hold, so it very quickly overstates real exposure (a user caught this: "150m committed but
+    // only 8m is actually max loss"). totalHeld() reflects only auctions we're presently leading.
+    const currentlyAtRisk = store.totalHeld();
+    if (currentlyAtRisk + projected > store.settings.limits.allocation) {
+      auction._decision = { verdict: 'skip', reason: `would exceed bot allocation (${fmt(store.settings.limits.allocation)} tokens)`, at: Date.now(), rule: rule.name || rule.id };
+      // This auction gets re-evaluated on every bid anywhere in it plus every poll cycle, so
+      // without throttling this was re-logging the identical warning every few seconds for as
+      // long as the auction stayed above the cap -- the decision column in the tracked-auctions
+      // table already shows this per-row continuously, so the activity log only needs it once in
+      // a while as a heads-up, not on every pass.
+      const lastWarned = this._spendCapWarned.get(auction._id) || 0;
+      if (Date.now() - lastWarned > 10 * 60 * 1000) {
+        this._spendCapWarned.set(auction._id, Date.now());
+        store.log('warn', `bot allocation reached, skipping ${skinLabel(skin)}`);
+      }
       return;
     }
 
@@ -431,6 +469,7 @@ class Sniper {
       await ccoSocket.setAutobid(auction._id, maxBid);
       store.bumpAutobidsSet();
       this.ownedByUs.set(auction._id, { amount: maxBid, rule: ruleLabel, ruleId, marketValueTokens: marketValue });
+      this.myAutobids.set(auction._id, maxBid); // optimistic -- the autobidSet confirmation also sets this, but don't wait on it for the dashboard to reflect it
       store.setHeld(auction._id, maxBid);
       store.addSessionCommitted(maxBid);
       auction._decision = { verdict: 'autobid-set', reason: `autobid up to ${fmt(maxBid)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: ruleLabel };
@@ -477,8 +516,7 @@ class Sniper {
     const minNext = minNextBid(auction.currentBid, auction.startingPrice);
     if (minNext > maxBid) return { ok: false, error: `min next bid ${fmt(minNext)} exceeds ${pct}% of market value (${fmt(maxBid)})` };
 
-    const sessionCommitted = store.runtime.ledger.sessionCommitted || 0;
-    if (sessionCommitted + maxBid > store.settings.limits.sessionSpendCap) return { ok: false, error: 'would exceed session spend cap' };
+    if (store.totalHeld() + maxBid > store.settings.limits.allocation) return { ok: false, error: 'would exceed bot allocation' };
 
     const skin = auction.auctionedSkinId;
     const label = `manual ${pct}%`;

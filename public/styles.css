@@ -123,5 +123,17 @@ input:checked + .slider { background: var(--accent); }
 input:checked + .slider:before { transform: translateX(16px); }
 .empty { color: var(--dim); padding: 20px; text-align: center; }
 .banner { background: #3a1f0a; border: 1px solid var(--yellow); color: #ffd591; padding: 12px 16px; border-radius: 8px; font-size: 13px; }
+.budget-bar-row { display: grid; gap: 6px; }
+.budget-bar-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); font-family: var(--mono); }
+.budget-bar { height: 10px; border-radius: 6px; background: #0b0e12; border: 1px solid var(--border); overflow: hidden; }
+.budget-bar-fill { height: 100%; background: var(--accent2); transition: width 0.3s ease; }
+.budget-bar-fill.warn { background: var(--yellow); }
+.budget-bar-fill.danger { background: var(--red); }
+#ruleBudgetBars { display: grid; gap: 10px; }
+#historyChart { margin-top: 4px; }
+#historyChart svg { width: 100%; height: 140px; display: block; }
+.chart-legend { display: flex; gap: 16px; font-size: 11px; color: var(--dim); margin-top: 4px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend .dotline { width: 10px; height: 2px; display: inline-block; }
 .icon { width: 32px; height: 32px; object-fit: contain; }
 a { color: var(--accent2); }

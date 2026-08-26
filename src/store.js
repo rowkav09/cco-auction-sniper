@@ -38,9 +38,11 @@ const DEFAULT_SETTINGS = {
     manualTokensPerDollar: 10,
   },
   limits: {
-    // Hard stop on cumulative NEW token commitments this run. Resets on server restart.
-    // Keep this conservative until you trust the rules -- raise it once dry-run output looks right.
-    sessionSpendCap: 10000000,
+    // How many tokens the bot is allowed to have AT RISK at once -- gated against currently-held
+    // amounts (store.totalHeld(), auctions we're presently leading), not a lifetime running total,
+    // since being outbid releases the hold immediately just like it does on the real site. Keep
+    // this conservative until you trust the rules -- raise it once dry-run output looks right.
+    allocation: 10000000,
     maxConcurrentTracked: 300,
   },
   defaultRule: {
@@ -240,13 +242,17 @@ class Store {
   }
 
   ruleStatsFor(ruleId) {
-    return this.runtime.ruleStats[ruleId] || { itemsWon: 0, totalSpentTokens: 0 };
+    return this.runtime.ruleStats[ruleId] || { itemsWon: 0, totalSpentTokens: 0, totalMarketValueTokens: 0 };
   }
 
-  recordRuleWin(ruleId, spentTokens) {
+  recordRuleWin(ruleId, spentTokens, marketValueTokens) {
     if (!ruleId) return;
     const cur = this.ruleStatsFor(ruleId);
-    this.runtime.ruleStats[ruleId] = { itemsWon: cur.itemsWon + 1, totalSpentTokens: cur.totalSpentTokens + (spentTokens || 0) };
+    this.runtime.ruleStats[ruleId] = {
+      itemsWon: cur.itemsWon + 1,
+      totalSpentTokens: cur.totalSpentTokens + (spentTokens || 0),
+      totalMarketValueTokens: cur.totalMarketValueTokens + (marketValueTokens || 0),
+    };
     this.saveRuntimeSoon();
     this._notify('ruleStats', this.runtime.ruleStats);
   }
