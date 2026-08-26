@@ -68,7 +68,10 @@ class BrowserSession extends EventEmitter {
     this.userId = null;
     this.userName = null;
     this._starting = null;
-    this._requestQueue = new RequestQueue(3, 150);
+    // Sequential with a 350ms gap, matching the pricedata userscript's own FETCH_DELAY_MS -- that
+    // value is proven safe against CCO's rate limiter from real usage; 3-way concurrency still
+    // tripped it during testing here.
+    this._requestQueue = new RequestQueue(1, 350);
   }
 
   /** Idempotent -- safe to call from multiple places (server boot, dashboard Start button). */
@@ -90,7 +93,13 @@ class BrowserSession extends EventEmitter {
       args: ['--window-position=0,0', '--disable-blink-features=AutomationControlled'],
     });
     this.page = this.context.pages()[0] || (await this.context.newPage());
-    this.context.on('close', () => { this.ready = false; this.socketConnected = false; store.log('warn', 'browser window was closed -- restart the app to reconnect'); });
+    this.context.on('close', () => {
+      this.ready = false;
+      this.socketConnected = false;
+      this._starting = null;
+      store.log('warn', 'browser window was closed -- the bot has stopped, restart the app to reconnect');
+      this.emit('closed');
+    });
 
     await this.page.goto(SITE, { waitUntil: 'domcontentloaded' });
     await this._ensureLoggedIn();

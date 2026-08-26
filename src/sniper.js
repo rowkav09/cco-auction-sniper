@@ -121,6 +121,10 @@ class Sniper {
     this.ourUserId = browserSession.userId;
     store.log('info', `identified as user ${browserSession.userName || '?'} (${this.ourUserId || 'unknown id'})`);
 
+    // If the Chrome window gets closed, every poll/emit will keep failing forever otherwise --
+    // stop cleanly instead of hammering a dead browser with retries every few seconds.
+    browserSession.once('closed', () => { if (this._running) this.stop(); });
+
     ccoSocket.connect();
     this._wireSocketEvents();
 

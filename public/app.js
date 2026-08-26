@@ -75,7 +75,11 @@ function connectWs() {
       renderStats();
     } else if (type === 'browser') {
       state.browser = payload;
+      // running can change on its own (e.g. the sniper auto-stops if the Chrome window gets
+      // closed) -- without this the Start/Stop buttons could get stuck showing stale state.
+      if (payload.running !== undefined) state.running = payload.running;
       renderBrowserStatus();
+      renderStats();
     }
   };
 }
@@ -91,12 +95,15 @@ function renderBrowserStatus() {
   const ccoDot = document.getElementById('ccoDot');
   const ccoText = document.getElementById('ccoText');
   const statusEl = document.getElementById('browserStatus');
+  const warning = document.getElementById('browserWarning');
   if (!b || !b.ready) {
     ccoDot.className = 'dot off';
     ccoText.textContent = 'browser not started';
     if (statusEl) statusEl.textContent = 'not started -- click Start (a Chrome window will open)';
+    warning.style.display = 'block';
     return;
   }
+  warning.style.display = 'none';
   ccoDot.className = 'dot ' + (b.socketConnected ? 'on' : 'off');
   ccoText.textContent = b.socketConnected ? `live (${b.userName})` : `browser ready, socket reconnecting…`;
   if (statusEl) statusEl.textContent = `${b.userName} (${b.userId})${b.socketConnected ? ', websocket connected' : ', websocket reconnecting…'}`;

@@ -32,6 +32,7 @@ function browserStatus() {
     socketConnected: browserSession.socketConnected,
     userId: browserSession.userId,
     userName: browserSession.userName,
+    running: sniper._running,
   };
 }
 
