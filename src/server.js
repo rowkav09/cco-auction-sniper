@@ -57,6 +57,7 @@ function fullState() {
 }
 
 function sampleHistory() {
+  const realizedPnlTokens = (store.runtime.stats.totalMarketValueOnWins || 0) - (store.runtime.stats.totalSpentOnWins || 0);
   history.record({
     balanceTokens: meCache.data?.tokens ?? null,
     heldTokens: store.totalHeld(),
@@ -64,6 +65,8 @@ function sampleHistory() {
     trackedAuctions: sniper.auctions.size,
     won: store.runtime.stats.won,
     lost: store.runtime.stats.lost,
+    unrealizedPnlTokens: sniper.unrealizedPnlTokens(),
+    realizedPnlTokens,
   });
 }
 

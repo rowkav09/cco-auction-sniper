@@ -130,10 +130,12 @@ input:checked + .slider:before { transform: translateX(16px); }
 .budget-bar-fill.warn { background: var(--yellow); }
 .budget-bar-fill.danger { background: var(--red); }
 #ruleBudgetBars { display: grid; gap: 10px; }
-#historyChart { margin-top: 4px; }
-#historyChart svg { width: 100%; height: 140px; display: block; }
-.chart-legend { display: flex; gap: 16px; font-size: 11px; color: var(--dim); margin-top: 4px; }
+.chart-block + .chart-block { margin-top: 18px; }
+.chart-block h3 { margin: 0 0 6px; font-size: 13px; color: var(--text); font-weight: 600; }
+.chart-block svg { width: 100%; height: 150px; display: block; }
+.chart-legend { display: flex; gap: 16px; font-size: 11px; color: var(--dim); margin-top: 4px; flex-wrap: wrap; }
 .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.chart-legend strong { color: var(--text); font-family: var(--mono); }
 .chart-legend .dotline { width: 10px; height: 2px; display: inline-block; }
 .icon { width: 32px; height: 32px; object-fit: contain; }
 a { color: var(--accent2); }

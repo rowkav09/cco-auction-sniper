@@ -244,33 +244,80 @@ function renderBudget() {
   renderHistoryChart();
 }
 
+// General-purpose small line chart: multiple labeled series sharing one Y axis, with actual
+// min/max/zero labels so even a flat or short line still reads as real numbers instead of an
+// unlabeled shape (a flat line with no scale looks like the chart is broken, not like "this
+// number hasn't moved yet").
+function svgLineChart(pts, series, opts = {}) {
+  const W = 900, H = 150, PAD_L = 60, PAD_R = 10, PAD_T = 10, PAD_B = 20;
+  const innerW = W - PAD_L - PAD_R, innerH = H - PAD_T - PAD_B;
+
+  if (pts.length < 2) {
+    return '<div class="hint">Chart fills in as the app runs (one sample every 30s) -- not enough data yet.</div>';
+  }
+
+  const allValues = series.flatMap((s) => pts.map((p) => s.get(p)).filter((v) => v != null));
+  // Forcing zero into the range makes sense for a series that's meaningfully centered near zero
+  // (P&L: profit vs. loss). For something like balance -- always a large positive number, never
+  // anywhere near zero -- it does the opposite: squashes all the actual movement into a sliver at
+  // the top of a mostly-empty 0-to-max chart, which is what was making that line look invisible.
+  const includeZero = opts.includeZero !== false;
+  let minY = includeZero ? Math.min(0, ...allValues) : Math.min(...allValues);
+  let maxY = includeZero ? Math.max(0, ...allValues) : Math.max(...allValues);
+  if (minY === maxY) { minY -= 1; maxY += 1; } // avoid a zero-height range on perfectly flat data
+  const pad = (maxY - minY) * 0.08;
+  minY -= pad; maxY += pad;
+
+  const xOf = (i) => PAD_L + (i / (pts.length - 1)) * innerW;
+  const yOf = (v) => PAD_T + innerH - ((v - minY) / (maxY - minY)) * innerH;
+  const zeroY = yOf(0);
+
+  const toPath = (getter) => pts.map((p, i) => {
+    const v = getter(p);
+    if (v == null) return null;
+    return `${i === 0 ? 'M' : 'L'}${xOf(i).toFixed(1)},${yOf(v).toFixed(1)}`;
+  }).filter(Boolean).join(' ');
+
+  const fmtY = opts.fmtY || ((v) => fmt(v));
+  const zeroLine = minY < 0 && maxY > 0
+    ? `<line x1="${PAD_L}" y1="${zeroY.toFixed(1)}" x2="${W - PAD_R}" y2="${zeroY.toFixed(1)}" stroke="#2a323d" stroke-dasharray="3,3" />`
+    : '';
+
+  const paths = series.map((s) => `<path d="${toPath(s.get)}" fill="none" stroke="${s.color}" stroke-width="2" />`).join('');
+  const first = pts[0], last = pts[pts.length - 1];
+  const timeLabel = (p) => new Date(p.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}">
+    ${zeroLine}
+    <text x="${PAD_L - 6}" y="${PAD_T + 4}" text-anchor="end" font-size="10" fill="#8b98a5">${fmtY(maxY)}</text>
+    <text x="${PAD_L - 6}" y="${H - PAD_B}" text-anchor="end" font-size="10" fill="#8b98a5">${fmtY(minY)}</text>
+    ${paths}
+    <text x="${PAD_L}" y="${H - 4}" font-size="10" fill="#8b98a5">${timeLabel(first)}</text>
+    <text x="${W - PAD_R}" y="${H - 4}" text-anchor="end" font-size="10" fill="#8b98a5">${timeLabel(last)}</text>
+  </svg>`;
+
+  const legend = series.map((s) => `<span><span class="dotline" style="background:${s.color}"></span>${s.label}: <strong>${fmtY(s.get(last))}</strong></span>`).join('');
+  return `${svg}<div class="chart-legend">${legend}<span>${pts.length} samples, ~${Math.round((pts.length * 30) / 60)} min</span></div>`;
+}
+
 function renderHistoryChart() {
-  const el = document.getElementById('historyChart');
   const pts = state.history;
-  if (pts.length < 2) { el.innerHTML = '<div class="hint">Chart fills in as the app runs (one sample every 30s).</div>'; return; }
-
-  const W = 900, H = 140, PAD = 8;
   const rate = state.fx?.rate || 10;
-  const committedSeries = pts.map((p) => (p.sessionCommittedTokens || 0) / rate);
-  const heldSeries = pts.map((p) => (p.heldTokens || 0) / rate);
-  const maxY = Math.max(1, ...committedSeries, ...heldSeries);
+  const dollarFmt = (v) => '$' + fmt(v);
 
-  const toPath = (series) => series.map((v, i) => {
-    const x = PAD + (i / (series.length - 1)) * (W - 2 * PAD);
-    const y = H - PAD - (v / maxY) * (H - 2 * PAD);
-    return `${i === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`;
-  }).join(' ');
+  document.getElementById('pnlChart').innerHTML = svgLineChart(pts, [
+    { label: 'Unrealized P&L', color: '#4c9aff', get: (p) => p.unrealizedPnlTokens != null ? p.unrealizedPnlTokens / rate : null },
+    { label: 'Realized P&L', color: '#3fb950', get: (p) => p.realizedPnlTokens != null ? p.realizedPnlTokens / rate : null },
+  ], { fmtY: dollarFmt });
 
-  el.innerHTML = `
-    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-      <path d="${toPath(heldSeries)}" fill="none" stroke="#4c9aff" stroke-width="2" />
-      <path d="${toPath(committedSeries)}" fill="none" stroke="#e07b39" stroke-width="2" />
-    </svg>
-    <div class="chart-legend">
-      <span><span class="dotline" style="background:#e07b39"></span>Committed ($)</span>
-      <span><span class="dotline" style="background:#4c9aff"></span>Held ($)</span>
-      <span>last ${pts.length} samples, ~${Math.round((pts.length * 30) / 60)} min</span>
-    </div>`;
+  document.getElementById('balanceChart').innerHTML = svgLineChart(pts, [
+    { label: 'Balance', color: '#e07b39', get: (p) => p.balanceTokens != null ? p.balanceTokens / rate : null },
+  ], { fmtY: dollarFmt, includeZero: false });
+
+  document.getElementById('allocationChart').innerHTML = svgLineChart(pts, [
+    { label: 'Held (at risk)', color: '#4c9aff', get: (p) => p.heldTokens != null ? p.heldTokens / rate : null },
+    { label: 'Lifetime committed', color: '#e07b39', get: (p) => p.sessionCommittedTokens != null ? p.sessionCommittedTokens / rate : null },
+  ], { fmtY: dollarFmt, includeZero: false });
 }
 
 // ---------- render: auctions ----------

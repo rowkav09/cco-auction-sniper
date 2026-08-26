@@ -113,6 +113,19 @@ class Sniper {
     };
   }
 
+  /** Sum of (market value - current bid) across every auction we're presently leading, in
+   * tokens. Positive means the auctions we're currently winning look collectively underpriced
+   * relative to the pricedata estimate; negative means we're currently overpaying overall. */
+  unrealizedPnlTokens() {
+    let sum = 0;
+    for (const a of this.auctions.values()) {
+      if (a.currentBidder !== this.ourUserId) continue;
+      if (a._marketValueTokens == null) continue;
+      sum += a._marketValueTokens - (a.currentBid || 0);
+    }
+    return sum;
+  }
+
   snapshot() {
     return [...this.auctions.values()].map((a) => {
       const myAutobidMax = this.myAutobids.get(a._id) ?? null;
