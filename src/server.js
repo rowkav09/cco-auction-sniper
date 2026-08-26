@@ -9,6 +9,7 @@ import { getMe } from './ccoRest.js';
 import { priceData, getTokensPerDollar } from './pricing.js';
 import { sniper } from './sniper.js';
 import { browserSession } from './browserSession.js';
+import { startTray } from './tray.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -49,10 +50,12 @@ function fullState() {
     ruleStats: store.runtime.ruleStats,
     auctions: sniper.snapshot(),
     log: store.recentLog(200),
+    categories: sniper.knownCategories(),
   };
 }
 
 app.get('/api/state', (req, res) => res.json(fullState()));
+app.get('/api/categories', (req, res) => res.json(sniper.knownCategories()));
 
 app.post('/api/settings', (req, res) => {
   const patch = req.body || {};
@@ -60,7 +63,7 @@ app.post('/api/settings', (req, res) => {
   res.json(store.settings);
   // Valuation changes (e.g. the $->tokens rate) should show up on already-tracked auctions right
   // away instead of trickling in as each one happens to get a fresh bid event.
-  if (patch.valuation) sniper.reevaluateAll().catch((e) => store.log('error', `reevaluate after settings change failed: ${e.message}`));
+  if (patch.valuation || patch.defaultRule) sniper.reevaluateAll().catch((e) => store.log('error', `reevaluate after settings change failed: ${e.message}`));
 });
 
 app.post('/api/rules', (req, res) => {
@@ -164,8 +167,11 @@ await priceData.start();
 
 sniper.start().catch((e) => store.log('error', `auto-start failed: ${e.message}`));
 
-process.on('SIGINT', async () => {
+async function shutdown() {
   sniper.stop();
   await browserSession.stop();
   process.exit(0);
-});
+}
+
+process.on('SIGINT', shutdown);
+startTray({ onQuit: shutdown });

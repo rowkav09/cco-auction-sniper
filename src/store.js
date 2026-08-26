@@ -47,6 +47,9 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     thresholdPct: 65,
     maxBidPct: 85,
+    maxBidAbsolute: null,
+    maxItemsToWin: null,
+    maxTotalSpend: null,
   },
   rules: [],
   // Substrings matched (case-insensitive) against a skin's name, purely to sort/flag them in the

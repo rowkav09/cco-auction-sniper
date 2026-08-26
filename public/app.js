@@ -8,6 +8,7 @@ const state = {
   priceData: {},
   sortMode: 'timeLeft',
   ruleStats: {},
+  categories: { weaponTypes: [], rarities: [] },
 };
 
 function fmt(n) {
@@ -312,6 +313,15 @@ document.getElementById('refreshAuctionsBtn').addEventListener('click', async (e
   finally { e.target.disabled = false; e.target.textContent = 'Refresh now'; }
 });
 
+// Weapon-type/rarity dropdown options are derived from whatever's actually showing up in
+// tracked auctions (see knownCategories() server-side) -- refresh occasionally so a category
+// that hasn't appeared yet shows up without needing a full page reload.
+async function refreshCategories() {
+  state.categories = await fetch('/api/categories').then((r) => r.json());
+  renderRules();
+}
+setInterval(refreshCategories, 60000);
+
 // ---------- render: log ----------
 function appendLog(entry) {
   const el = document.getElementById('log');
@@ -345,6 +355,10 @@ function renderSettingsForm() {
   document.getElementById('defaultRuleEnabled').checked = !!s.defaultRule.enabled;
   document.getElementById('defaultThreshold').value = s.defaultRule.thresholdPct;
   document.getElementById('defaultMaxBidPct').value = s.defaultRule.maxBidPct;
+  document.getElementById('defaultMaxBidAbsolute').value = s.defaultRule.maxBidAbsolute != null ? fromTokens(s.defaultRule.maxBidAbsolute) : '';
+  document.getElementById('defaultMaxItemsToWin').value = s.defaultRule.maxItemsToWin ?? '';
+  document.getElementById('defaultMaxTotalSpend').value = s.defaultRule.maxTotalSpend != null ? fromTokens(s.defaultRule.maxTotalSpend) : '';
+  document.getElementById('defaultRuleStats').textContent = ruleStatsHint({ id: 'default', ...s.defaultRule });
   document.getElementById('favoritesInput').value = (s.favorites || []).join('\n');
 }
 
@@ -386,11 +400,17 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async (e) =
 });
 
 document.getElementById('saveDefaultRuleBtn').addEventListener('click', async (e) => {
+  const maxBidAbsolute = document.getElementById('defaultMaxBidAbsolute').value;
+  const maxItemsToWin = document.getElementById('defaultMaxItemsToWin').value;
+  const maxTotalSpend = document.getElementById('defaultMaxTotalSpend').value;
   await patchSettings({
     defaultRule: {
       enabled: document.getElementById('defaultRuleEnabled').checked,
       thresholdPct: Number(document.getElementById('defaultThreshold').value),
       maxBidPct: Number(document.getElementById('defaultMaxBidPct').value),
+      maxBidAbsolute: maxBidAbsolute === '' ? null : toTokens(Number(maxBidAbsolute)),
+      maxItemsToWin: maxItemsToWin === '' ? null : Number(maxItemsToWin),
+      maxTotalSpend: maxTotalSpend === '' ? null : toTokens(Number(maxTotalSpend)),
     },
   }, e.target);
 });
@@ -432,8 +452,19 @@ function renderRules() {
   rules.forEach((r) => wireRuleCard(r.id));
 }
 
+const EXTERIORS = ['Factory New', 'Minimal Wear', 'Field-Tested', 'Well-Worn', 'Battle-Scarred'];
+const TRI_STATE = [{ v: '', label: '(any)' }, { v: 'true', label: 'Yes' }, { v: 'false', label: 'No' }];
+
+function optionsHtml(values, current) {
+  return `<option value="">(any)</option>` + values.map((v) => `<option value="${v}" ${v === current ? 'selected' : ''}>${v}</option>`).join('');
+}
+function triStateHtml(cls, current) {
+  return `<select class="${cls}">${TRI_STATE.map((o) => `<option value="${o.v}" ${String(current ?? '') === o.v ? 'selected' : ''}>${o.label}</option>`).join('')}</select>`;
+}
+
 function ruleCardHtml(r) {
   const m = r.match || {};
+  const cats = state.categories || { weaponTypes: [], rarities: [] };
   return `<div class="rule-card" data-id="${r.id}">
     <div class="rule-head">
       <label class="switch"><input type="checkbox" class="r-enabled" ${r.enabled ? 'checked' : ''}><span class="slider"></span></label>
@@ -443,13 +474,11 @@ function ruleCardHtml(r) {
     </div>
     <div class="match-grid">
       <div><label>Name contains</label><input type="text" class="r-nameContains" value="${(m.nameContains || '').replace(/"/g, '&quot;')}" placeholder="e.g. Karambit"></div>
-      <div><label>Weapon type</label><input type="text" class="r-weaponType" value="${m.weaponType || ''}" placeholder="e.g. Knives"></div>
-      <div><label>Rarity</label><input type="text" class="r-rarity" value="${m.rarity || ''}" placeholder="e.g. Covert"></div>
-      <div><label>Exterior</label><input type="text" class="r-exterior" value="${m.exterior || ''}" placeholder="e.g. Factory New"></div>
-      <div><label>StatTrak (blank/true/false)</label><input type="text" class="r-statTrak" value="${m.statTrak ?? ''}"></div>
-      <div><label>Souvenir (blank/true/false)</label><input type="text" class="r-souvenir" value="${m.souvenir ?? ''}"></div>
-      <div><label>Min native $ price</label><input type="number" class="r-minNativePrice" value="${m.minNativePrice ?? ''}"></div>
-      <div><label>Max native $ price</label><input type="number" class="r-maxNativePrice" value="${m.maxNativePrice ?? ''}"></div>
+      <div><label>Weapon type</label><select class="r-weaponType">${optionsHtml(cats.weaponTypes, m.weaponType)}</select></div>
+      <div><label>Rarity</label><select class="r-rarity">${optionsHtml(cats.rarities, m.rarity)}</select></div>
+      <div><label>Exterior</label><select class="r-exterior">${optionsHtml(EXTERIORS, m.exterior)}</select></div>
+      <div><label>StatTrak</label>${triStateHtml('r-statTrak', m.statTrak)}</div>
+      <div><label>Souvenir</label>${triStateHtml('r-souvenir', m.souvenir)}</div>
     </div>
     <div class="match-grid">
       <div><label>Threshold % of market value (act if min next bid ≤ this)</label><input type="number" class="r-thresholdPct" value="${r.thresholdPct}"></div>
@@ -494,8 +523,6 @@ function wireRuleCard(id) {
         exterior: g('r-exterior') || undefined,
         statTrak: parseBool(g('r-statTrak')),
         souvenir: parseBool(g('r-souvenir')),
-        minNativePrice: g('r-minNativePrice') === '' ? undefined : Number(g('r-minNativePrice')),
-        maxNativePrice: g('r-maxNativePrice') === '' ? undefined : Number(g('r-maxNativePrice')),
       },
     };
     await fetch(`/api/rules/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });

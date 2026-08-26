@@ -24,13 +24,16 @@ function ruleMatches(match, skin) {
   if (!match) return true;
   const name = (skin.name || '').toLowerCase();
   if (match.nameContains && !name.includes(match.nameContains.toLowerCase())) return false;
-  if (match.weaponType && skin.weaponType !== match.weaponType) return false;
+  if (match.weaponType) {
+    // Gloves aren't a weaponType value in CCO's own data (they're a separate top-level `type`),
+    // so "Gloves" needs its own check rather than a plain weaponType equality.
+    if (match.weaponType === 'Gloves') { if (skin.type !== 'Gloves') return false; }
+    else if (skin.weaponType !== match.weaponType) return false;
+  }
   if (match.rarity && skin.rarity !== match.rarity) return false;
   if (match.exterior && skin.exterior !== match.exterior) return false;
   if (match.statTrak != null && match.statTrak !== '' && !!skin.statTrak !== !!match.statTrak) return false;
   if (match.souvenir != null && match.souvenir !== '' && !!skin.souvenir !== !!match.souvenir) return false;
-  if (match.minNativePrice != null && match.minNativePrice !== '' && (skin.price || 0) < Number(match.minNativePrice)) return false;
-  if (match.maxNativePrice != null && match.maxNativePrice !== '' && (skin.price || 0) > Number(match.maxNativePrice)) return false;
   return true;
 }
 
@@ -82,6 +85,25 @@ class Sniper {
     clearTimeout(this._broadcastTimer);
     this._broadcastTimer = null;
     store._notify('auctions', this.snapshot());
+  }
+
+  /** Weapon type and rarity strings aren't a documented enum (and aren't consistently pluralized
+   * -- "Rifles" but "Knife", confirmed empirically) so rather than hardcode a guessed list for
+   * the rule-builder dropdowns, derive it from what's actually showing up in tracked auctions. */
+  knownCategories() {
+    const weaponTypes = new Set();
+    const rarities = new Set();
+    for (const a of this.auctions.values()) {
+      const skin = a.auctionedSkinId;
+      if (!skin) continue;
+      if (skin.weaponType) weaponTypes.add(skin.weaponType);
+      if (skin.type === 'Gloves') weaponTypes.add('Gloves');
+      if (skin.rarity) rarities.add(skin.rarity);
+    }
+    return {
+      weaponTypes: [...weaponTypes].sort(),
+      rarities: [...rarities].sort(),
+    };
   }
 
   snapshot() {

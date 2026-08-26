@@ -39,13 +39,19 @@ The bot starts in **dry run** by default: it evaluates every auction and logs ex
 
 ## Rules
 
-Rules are checked top to bottom; the first enabled one whose filters (name/weapon/rarity/exterior/StatTrak/Souvenir/native $ price range) match an auctioned skin is used. Each rule sets:
+Rules are checked top to bottom; the first enabled one whose filters (name contains / weapon type / rarity / exterior / StatTrak / Souvenir) match an auctioned skin is used. Weapon type and rarity are dropdowns populated from what's actually showing up in tracked auctions, not a guessed/hardcoded list -- CCO's own category strings aren't consistently named (`"Rifles"` but `"Knife"`, singular), so a hand-typed value could silently never match anything.
+
+Each rule sets:
 
 - **Threshold %** — only act if the minimum next bid is at or below this % of market value.
 - **Max bid %** — the ceiling we're willing to pay, as a % of market value, even in a bidding war.
-- **Max bid absolute** (optional) — a hard token cap regardless of the above.
+- **Max bid per item** (optional, $) — a hard cap on a single auction regardless of the above.
+- **Max items to win** (optional) — stop bidding through this rule once it's won this many items.
+- **Max total spend** (optional, $) — a running budget for this rule specifically, separate from the global session cap. Each rule card shows how much of its own caps it's used so far.
 
-An auction that matches no rule is ignored, unless you enable the **default rule** as a catch-all.
+The default rule (a catch-all for anything no other rule matched) has the same threshold/ceiling/cap fields as a regular rule, just no match filters.
+
+An auction that matches no rule is ignored unless the default rule is enabled.
 
 ## Safety rails
 

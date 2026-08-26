@@ -129,7 +129,11 @@
         <div class="match-grid">
           <div><label>Threshold % of market value</label><input id="defaultThreshold" type="number" min="1" max="100"></div>
           <div><label>Max bid % of market value</label><input id="defaultMaxBidPct" type="number" min="1" max="200"></div>
+          <div><label>Max bid per item ($, optional)</label><input id="defaultMaxBidAbsolute" type="number" min="0"></div>
+          <div><label>Max items to win (optional)</label><input id="defaultMaxItemsToWin" type="number" min="1"></div>
+          <div><label>Max total spend ($, optional)</label><input id="defaultMaxTotalSpend" type="number" min="0"></div>
         </div>
+        <div class="hint" id="defaultRuleStats"></div>
         <button id="saveDefaultRuleBtn" class="small">Save default rule</button>
       </div>
 
