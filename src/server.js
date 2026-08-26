@@ -46,6 +46,7 @@ function fullState() {
     me: meCache,
     ledger: { ...store.runtime.ledger, totalHeld: store.totalHeld() },
     stats: store.runtime.stats,
+    ruleStats: store.runtime.ruleStats,
     auctions: sniper.snapshot(),
     log: store.recentLog(200),
   };
@@ -141,6 +142,7 @@ store.onChange((type, payload) => {
   if (type === 'log') { broadcast('log', payload); return; }
   if (type === 'ledger') { broadcast('ledger', { ...payload, totalHeld: store.totalHeld() }); return; }
   if (type === 'stats') { broadcast('stats', payload); return; }
+  if (type === 'ruleStats') { broadcast('ruleStats', payload); return; }
   if (type === 'settings') { broadcast('settings', store.settings); return; }
   if (type === 'me') { broadcast('me', payload); return; }
 });

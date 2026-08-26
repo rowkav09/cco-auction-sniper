@@ -117,7 +117,14 @@ class Sniper {
     if (this._running) return;
     this._running = true;
 
-    await browserSession.start(); // opens/reuses the Chrome window, blocks here until logged in
+    try {
+      await browserSession.start(); // opens/reuses the Chrome window, blocks here until logged in
+    } catch (e) {
+      // Don't leave _running stuck true on a failed launch -- that would permanently block every
+      // future start() call via the guard above, since nothing else ever resets it.
+      this._running = false;
+      throw e;
+    }
     this.ourUserId = browserSession.userId;
     store.log('info', `identified as user ${browserSession.userName || '?'} (${this.ourUserId || 'unknown id'})`);
 
@@ -214,6 +221,7 @@ class Sniper {
     const owned = this.ownedByUs.get(id);
     if (owned || wonByUs) {
       store.recordOutcome({ won: !!wonByUs, spent: wonByUs ? payload.finalPrice : 0, marketValue: owned?.marketValueTokens });
+      if (wonByUs && owned?.ruleId) store.recordRuleWin(owned.ruleId, payload.finalPrice);
       store.log(wonByUs ? 'info' : 'info', wonByUs ? `WON auction: ${skinLabel(this.auctions.get(id)?.auctionedSkinId)} for ${payload.finalPrice} tokens` : `lost auction we were tracking: ${skinLabel(this.auctions.get(id)?.auctionedSkinId)}`, payload);
     }
     this._onAuctionRemoved(payload, 'ended');
@@ -320,12 +328,29 @@ class Sniper {
       return;
     }
 
+    const ruleStats = store.ruleStatsFor(rule.id);
+    if (rule.maxItemsToWin && ruleStats.itemsWon >= Number(rule.maxItemsToWin)) {
+      auction._decision = { verdict: 'skip', reason: `rule has already won its limit of ${rule.maxItemsToWin} item(s)`, at: Date.now(), rule: rule.name || rule.id };
+      return;
+    }
+
     const marketValue = valuation.marketValueTokens;
     const minNext = minNextBid(auction.currentBid, auction.startingPrice);
     const thresholdPrice = marketValue * (rule.thresholdPct / 100);
     let maxBid = marketValue * (rule.maxBidPct / 100);
     if (rule.maxBidAbsolute) maxBid = Math.min(maxBid, Number(rule.maxBidAbsolute));
     maxBid = Math.min(maxBid, MAX_SINGLE_BID);
+
+    if (rule.maxTotalSpend && ruleStats.totalSpentTokens + maxBid > Number(rule.maxTotalSpend)) {
+      // Clamp rather than skip outright -- if there's still some budget left, bid up to what's
+      // left instead of giving up on an otherwise-attractive auction entirely.
+      const remaining = Math.max(0, Number(rule.maxTotalSpend) - ruleStats.totalSpentTokens);
+      if (remaining <= 0) {
+        auction._decision = { verdict: 'skip', reason: `rule has already spent its ${fmt(Number(rule.maxTotalSpend))}-token budget`, at: Date.now(), rule: rule.name || rule.id };
+        return;
+      }
+      maxBid = Math.min(maxBid, remaining);
+    }
 
     if ((auction.consecutiveBidCount || 0) >= MAX_CONSECUTIVE_BIDS) {
       auction._decision = { verdict: 'skip', reason: 'we already hit the consecutive-bid limit here', at: Date.now(), rule: rule.name || rule.id };
@@ -369,19 +394,21 @@ class Sniper {
     }
 
     if (strategy === 'autobid') {
-      await this._executeAutobid(auction, skin, maxBid, marketValue, rule.name || rule.id);
+      await this._executeAutobid(auction, skin, maxBid, marketValue, rule.name || rule.id, rule.id);
     } else {
-      await this._executeSnipeBid(auction, skin, minNext, marketValue, rule.name || rule.id);
+      await this._executeSnipeBid(auction, skin, minNext, marketValue, rule.name || rule.id, rule.id);
     }
   }
 
   /** Sets an autobid and records the (worst-case) commitment. Used by both the rule engine and
-   * the dashboard's manual quick-action buttons. Caller is responsible for dry-run/cap checks. */
-  async _executeAutobid(auction, skin, maxBid, marketValue, ruleLabel) {
+   * the dashboard's manual quick-action buttons (which pass ruleId undefined -- a manual bid
+   * isn't attributed to any rule's maxItemsToWin/maxTotalSpend caps). Caller is responsible for
+   * dry-run/cap checks. */
+  async _executeAutobid(auction, skin, maxBid, marketValue, ruleLabel, ruleId) {
     try {
       await ccoSocket.setAutobid(auction._id, maxBid);
       store.bumpAutobidsSet();
-      this.ownedByUs.set(auction._id, { amount: maxBid, rule: ruleLabel, marketValueTokens: marketValue });
+      this.ownedByUs.set(auction._id, { amount: maxBid, rule: ruleLabel, ruleId, marketValueTokens: marketValue });
       store.setHeld(auction._id, maxBid);
       store.addSessionCommitted(maxBid);
       auction._decision = { verdict: 'autobid-set', reason: `autobid up to ${fmt(maxBid)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: ruleLabel };
@@ -393,11 +420,11 @@ class Sniper {
     }
   }
 
-  async _executeSnipeBid(auction, skin, amount, marketValue, ruleLabel) {
+  async _executeSnipeBid(auction, skin, amount, marketValue, ruleLabel, ruleId) {
     try {
       await ccoSocket.placeBid(auction._id, amount);
       store.bumpBidsPlaced();
-      this.ownedByUs.set(auction._id, { amount, rule: ruleLabel, marketValueTokens: marketValue });
+      this.ownedByUs.set(auction._id, { amount, rule: ruleLabel, ruleId, marketValueTokens: marketValue });
       store.setHeld(auction._id, amount);
       store.addSessionCommitted(amount);
       auction._decision = { verdict: 'bid-placed', reason: `bid ${fmt(amount)} tokens (market value ${fmt(marketValue)})`, at: Date.now(), rule: ruleLabel };

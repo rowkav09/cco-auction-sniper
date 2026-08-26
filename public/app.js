@@ -7,6 +7,7 @@ const state = {
   auctions: [],
   priceData: {},
   sortMode: 'timeLeft',
+  ruleStats: {},
 };
 
 function fmt(n) {
@@ -20,6 +21,18 @@ function usd(tokens) {
   if (tokens == null || isNaN(tokens)) return '—';
   const rate = state.fx?.rate || 10;
   return '$' + fmt(tokens / rate);
+}
+// Inverse of usd() -- settings/rule inputs are entered in dollars but stored internally in
+// tokens (that's the unit the bidding math and the CCO API actually use).
+function toTokens(dollars) {
+  if (dollars == null || isNaN(dollars)) return null;
+  const rate = state.fx?.rate || 10;
+  return Math.round(dollars * rate);
+}
+function fromTokens(tokens) {
+  if (tokens == null || isNaN(tokens)) return null;
+  const rate = state.fx?.rate || 10;
+  return Math.round((tokens / rate) * 100) / 100;
 }
 function timeLeft(iso) {
   const ms = new Date(iso).getTime() - Date.now();
@@ -80,6 +93,9 @@ function connectWs() {
       if (payload.running !== undefined) state.running = payload.running;
       renderBrowserStatus();
       renderStats();
+    } else if (type === 'ruleStats') {
+      state.ruleStats = payload;
+      renderRules();
     }
   };
 }
@@ -324,7 +340,7 @@ function renderSettingsForm() {
   document.getElementById('requireValidToggle').checked = !!s.valuation.requireValid;
   document.getElementById('manualFxInput').value = s.valuation.manualTokensPerDollar ?? '';
   document.getElementById('minCalSamplesInput').value = s.valuation.minCalibrationSamples;
-  document.getElementById('spendCapInput').value = s.limits.sessionSpendCap;
+  document.getElementById('spendCapInput').value = fromTokens(s.limits.sessionSpendCap);
   document.getElementById('maxTrackedInput').value = s.limits.maxConcurrentTracked;
   document.getElementById('defaultRuleEnabled').checked = !!s.defaultRule.enabled;
   document.getElementById('defaultThreshold').value = s.defaultRule.thresholdPct;
@@ -332,9 +348,9 @@ function renderSettingsForm() {
   document.getElementById('favoritesInput').value = (s.favorites || []).join('\n');
 }
 
-document.getElementById('saveFavoritesBtn').addEventListener('click', async () => {
+document.getElementById('saveFavoritesBtn').addEventListener('click', async (e) => {
   const favorites = document.getElementById('favoritesInput').value.split('\n').map((s) => s.trim()).filter(Boolean);
-  await patchSettings({ favorites });
+  await patchSettings({ favorites }, e.target);
 });
 
 document.getElementById('testConnBtn').addEventListener('click', async () => {
@@ -347,7 +363,7 @@ document.getElementById('testConnBtn').addEventListener('click', async () => {
   out.style.color = res.ok ? '#3fb950' : '#f85149';
 });
 
-document.getElementById('saveSettingsBtn').addEventListener('click', async () => {
+document.getElementById('saveSettingsBtn').addEventListener('click', async (e) => {
   await patchSettings({
     dryRun: document.getElementById('dryRunToggle').checked,
     strategy: document.getElementById('strategySelect').value,
@@ -363,27 +379,38 @@ document.getElementById('saveSettingsBtn').addEventListener('click', async () =>
       minCalibrationSamples: Number(document.getElementById('minCalSamplesInput').value),
     },
     limits: {
-      sessionSpendCap: Number(document.getElementById('spendCapInput').value),
+      sessionSpendCap: toTokens(Number(document.getElementById('spendCapInput').value)),
       maxConcurrentTracked: Number(document.getElementById('maxTrackedInput').value),
     },
-  });
+  }, e.target);
 });
 
-document.getElementById('saveDefaultRuleBtn').addEventListener('click', async () => {
+document.getElementById('saveDefaultRuleBtn').addEventListener('click', async (e) => {
   await patchSettings({
     defaultRule: {
       enabled: document.getElementById('defaultRuleEnabled').checked,
       thresholdPct: Number(document.getElementById('defaultThreshold').value),
       maxBidPct: Number(document.getElementById('defaultMaxBidPct').value),
     },
-  });
+  }, e.target);
 });
 
-async function patchSettings(patch) {
+async function patchSettings(patch, btn) {
   const res = await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) });
   state.settings = await res.json();
   renderSettingsForm();
   renderStats();
+  if (btn) flashSaved(btn);
+}
+
+// Buttons that just save settings (no error state to report, nothing else visibly changes if
+// the value you typed matches what was already there) got reported as "does nothing" -- flash a
+// clear confirmation instead of silently succeeding.
+function flashSaved(btn) {
+  const original = btn.textContent;
+  btn.textContent = 'Saved ✓';
+  btn.disabled = true;
+  setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1200);
 }
 
 document.getElementById('startBtn').addEventListener('click', async () => {
@@ -427,10 +454,21 @@ function ruleCardHtml(r) {
     <div class="match-grid">
       <div><label>Threshold % of market value (act if min next bid ≤ this)</label><input type="number" class="r-thresholdPct" value="${r.thresholdPct}"></div>
       <div><label>Max bid % of market value (ceiling)</label><input type="number" class="r-maxBidPct" value="${r.maxBidPct}"></div>
-      <div><label>Max bid absolute (tokens, optional)</label><input type="number" class="r-maxBidAbsolute" value="${r.maxBidAbsolute ?? ''}"></div>
+      <div><label>Max bid per item ($, optional)</label><input type="number" class="r-maxBidAbsolute" value="${r.maxBidAbsolute != null ? fromTokens(r.maxBidAbsolute) : ''}"></div>
+      <div><label>Max items to win (optional)</label><input type="number" min="1" class="r-maxItemsToWin" value="${r.maxItemsToWin ?? ''}"></div>
+      <div><label>Max total spend ($, optional)</label><input type="number" class="r-maxTotalSpend" value="${r.maxTotalSpend != null ? fromTokens(r.maxTotalSpend) : ''}"></div>
     </div>
+    <div class="hint">${ruleStatsHint(r)}</div>
     <button class="small r-save">Save rule</button>
   </div>`;
+}
+
+function ruleStatsHint(r) {
+  const s = (state.ruleStats && state.ruleStats[r.id]) || { itemsWon: 0, totalSpentTokens: 0 };
+  const parts = [`${s.itemsWon} won so far`, `${usd(s.totalSpentTokens)} spent so far`];
+  if (r.maxItemsToWin) parts.push(`${Math.max(0, r.maxItemsToWin - s.itemsWon)} more allowed`);
+  if (r.maxTotalSpend) parts.push(`${usd(Math.max(0, r.maxTotalSpend - s.totalSpentTokens))} budget left`);
+  return parts.join(' · ');
 }
 
 function wireRuleCard(id) {
@@ -438,7 +476,7 @@ function wireRuleCard(id) {
   card.querySelector('.r-remove').addEventListener('click', async () => {
     await fetch(`/api/rules/${id}`, { method: 'DELETE' });
   });
-  card.querySelector('.r-save').addEventListener('click', async () => {
+  card.querySelector('.r-save').addEventListener('click', async (e) => {
     const g = (cls) => card.querySelector(`.${cls}`).value.trim();
     const parseBool = (v) => (v === '' ? null : v === 'true');
     const body = {
@@ -446,7 +484,9 @@ function wireRuleCard(id) {
       enabled: card.querySelector('.r-enabled').checked,
       thresholdPct: Number(g('r-thresholdPct')),
       maxBidPct: Number(g('r-maxBidPct')),
-      maxBidAbsolute: g('r-maxBidAbsolute') === '' ? null : Number(g('r-maxBidAbsolute')),
+      maxBidAbsolute: g('r-maxBidAbsolute') === '' ? null : toTokens(Number(g('r-maxBidAbsolute'))),
+      maxItemsToWin: g('r-maxItemsToWin') === '' ? null : Number(g('r-maxItemsToWin')),
+      maxTotalSpend: g('r-maxTotalSpend') === '' ? null : toTokens(Number(g('r-maxTotalSpend'))),
       match: {
         nameContains: g('r-nameContains') || undefined,
         weaponType: g('r-weaponType') || undefined,
@@ -459,6 +499,7 @@ function wireRuleCard(id) {
       },
     };
     await fetch(`/api/rules/${id}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    flashSaved(e.target);
   });
 }
 

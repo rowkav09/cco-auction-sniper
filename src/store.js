@@ -86,12 +86,17 @@ function saveJson(p, data) {
 class Store {
   constructor() {
     this.settings = deepMerge(DEFAULT_SETTINGS, loadJson(SETTINGS_PATH, {}));
-    this.runtime = loadJson(RUNTIME_PATH, {
+    // deepMerge here too, not a plain load -- data/runtime.json persists across restarts, so a
+    // file written before a new field existed (e.g. ruleStats, added after calibration was
+    // already shipping) would otherwise come back missing that key entirely and crash the first
+    // thing that reads it.
+    this.runtime = deepMerge({
       ledger: { heldByAuction: {}, sessionCommitted: 0 },
       stats: { bidsPlaced: 0, autobidsSet: 0, won: 0, lost: 0, totalSpentOnWins: 0, totalMarketValueOnWins: 0 },
       cooldowns: {}, // auctionId -> ISO timestamp until which we skip it
       calibration: { samplesByAuction: {} }, // $->tokens FX calibration samples, see pricing.js
-    });
+      ruleStats: {}, // ruleId -> { itemsWon, totalSpentTokens } -- backs a rule's maxItemsToWin/maxTotalSpend caps
+    }, loadJson(RUNTIME_PATH, {}));
     this._logBuf = this._loadRecentLog(200);
     this._saveTimer = null;
     this._subscribers = new Set();
@@ -229,6 +234,18 @@ class Store {
     this.runtime.stats.autobidsSet += 1;
     this.saveRuntimeSoon();
     this._notify('stats', this.runtime.stats);
+  }
+
+  ruleStatsFor(ruleId) {
+    return this.runtime.ruleStats[ruleId] || { itemsWon: 0, totalSpentTokens: 0 };
+  }
+
+  recordRuleWin(ruleId, spentTokens) {
+    if (!ruleId) return;
+    const cur = this.ruleStatsFor(ruleId);
+    this.runtime.ruleStats[ruleId] = { itemsWon: cur.itemsWon + 1, totalSpentTokens: cur.totalSpentTokens + (spentTokens || 0) };
+    this.saveRuntimeSoon();
+    this._notify('ruleStats', this.runtime.ruleStats);
   }
 }
 

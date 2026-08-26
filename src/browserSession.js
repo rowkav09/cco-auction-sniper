@@ -77,21 +77,37 @@ class BrowserSession extends EventEmitter {
   /** Idempotent -- safe to call from multiple places (server boot, dashboard Start button). */
   start() {
     if (this._starting) return this._starting;
-    this._starting = this._start();
+    this._starting = this._start().catch((e) => {
+      // Don't cache a rejected promise forever -- a transient launch failure (e.g. a stale
+      // Chrome profile lock right after a previous instance was killed) would otherwise wedge
+      // every future start() call, since the guard above just returns the same rejection.
+      this._starting = null;
+      throw e;
+    });
     return this._starting;
   }
 
   async _start() {
     store.log('info', 'launching browser session...');
-    this.context = await chromium.launchPersistentContext(PROFILE_DIR, {
-      channel: 'chrome',
-      headless: false, // bidding is consequential even in a game -- keep it visible, not a silent background process
-      viewport: { width: 1100, height: 800 },
-      // Without this, Playwright leaves navigator.webdriver === true, which Cloudflare's bot
-      // management checks for directly -- confirmed empirically: same profile, same site, 403
-      // "Just a moment..." with this flag absent, clean 200 JSON with it present.
-      args: ['--window-position=0,0', '--disable-blink-features=AutomationControlled'],
-    });
+    try {
+      this.context = await chromium.launchPersistentContext(PROFILE_DIR, {
+        channel: 'chrome',
+        headless: false, // bidding is consequential even in a game -- keep it visible, not a silent background process
+        viewport: { width: 1100, height: 800 },
+        // Without this, Playwright leaves navigator.webdriver === true, which Cloudflare's bot
+        // management checks for directly -- confirmed empirically: same profile, same site, 403
+        // "Just a moment..." with this flag absent, clean 200 JSON with it present.
+        args: ['--window-position=0,0', '--disable-blink-features=AutomationControlled'],
+      });
+    } catch (e) {
+      if (/ProcessSingleton|already in use/i.test(e.message)) {
+        throw new Error(
+          'Chrome profile is locked by a leftover process from a previous run (usually from the app being killed rather than stopped cleanly). ' +
+          'Open Task Manager, end any chrome.exe processes with no window/title, then try Start again.'
+        );
+      }
+      throw e;
+    }
     this.page = this.context.pages()[0] || (await this.context.newPage());
     this.context.on('close', () => {
       this.ready = false;
