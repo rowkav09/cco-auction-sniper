@@ -359,7 +359,9 @@ async function quickAutobid(id, pct, btn) {
 
 function marketValueCellHtml(a) {
   if (a.marketValueDollars != null) return `$${fmt(a.marketValueDollars)}`;
-  return a.valuationConfidence === 'uncalibrated' ? 'set $→tokens rate' : (a.valuationConfidence || '—');
+  if (a.valuationConfidence === 'uncalibrated') return 'set $→tokens rate';
+  if (a.valuationConfidence === 'unpriced-special') return '<span title="event/rare-float item -- the pricing formula has no real number for this, so it\'s excluded rather than shown wrong">unpriced (rare)</span>';
+  return a.valuationConfidence || '—';
 }
 
 function quickActionsCellHtml(a) {

@@ -205,6 +205,19 @@ class PriceDataService {
       source = 'katowice-3x';
     }
 
+    // A skin can be genuinely rare -- an event drop, or holding just one end of a float extreme
+    // (rank 1 for lowest OR highest, not both) -- without any of the branches above ever having
+    // touched `price`. The formula (ported as-is from the sheet's own methodology) only prices
+    // event/near-1-of-1 premiums through the patternId-matched branch or a full lowest+highest
+    // 1/1; anything else with these signals silently falls through to the bare native price.
+    // Confirmed against a real case: an event-tagged SSG 08 nicknamed "Event HF: #1" (rank 1 for
+    // highest-float-in-event-skingroup) priced at its $0.05 native value while actually being bid
+    // to $2M+ in the live auction house. Flag it instead of returning a confident-looking number
+    // that isn't one -- valuateAuction treats this as low-confidence and won't auto-bid on it.
+    const partialFloatExtreme = (ranks[6] === 1) !== (ranks[7] === 1) || (ranks[18] === 1) !== (ranks[19] === 1);
+    const unpricedSpecial = source === 'fallback-native' && (!!skin.event || partialFloatExtreme);
+    if (unpricedSpecial) source = 'fallback-native-unpriced-special';
+
     return { calc: price, native, source };
   }
 }
@@ -278,14 +291,27 @@ export async function valuateAuction(auction) {
   }
 
   const dollarEstimate = priceData.calcDollarPrice(auction.auctionedSkinId || {});
+  const isUnpricedSpecial = dollarEstimate.source === 'fallback-native-unpriced-special';
 
+  // Don't let an unpriced-special's near-zero $ estimate poison the $->tokens calibration --
+  // dividing a real comparable-sale price by a ~$0.05 estimate would produce a wildly inflated
+  // ratio and drag the calibrated rate off for everything else.
   const historyUsable = history && history.count >= minComparableSales && (!requireValid || history.isValid !== false);
-  if (historyUsable && dollarEstimate.source !== 'loading' && dollarEstimate.calc > 0) {
+  if (historyUsable && !isUnpricedSpecial && dollarEstimate.source !== 'loading' && dollarEstimate.calc > 0) {
     recordCalibrationSample(auction._id, history.average / dollarEstimate.calc);
   }
 
   if (dollarEstimate.source === 'loading' || !dollarEstimate.calc) {
     return { marketValueTokens: null, confidence: 'none', reason: 'pricedata sheet not loaded yet', history, dollarEstimate };
+  }
+
+  if (isUnpricedSpecial) {
+    return {
+      marketValueTokens: null,
+      confidence: 'unpriced-special',
+      reason: 'event/rare-float item the pricing formula has no real number for (falls back to native $ price, which would be misleadingly tiny) -- skipped rather than bid on a guess',
+      history, dollarEstimate,
+    };
   }
 
   const fx = getTokensPerDollar();

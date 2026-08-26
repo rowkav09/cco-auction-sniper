@@ -73,6 +73,18 @@ function sampleHistory() {
 app.get('/api/state', (req, res) => res.json(fullState()));
 app.get('/api/categories', (req, res) => res.json(sniper.knownCategories()));
 
+// Temporary diagnostic route -- dumps the raw skin object + valuation breakdown for one tracked
+// auction, to debug why a market value looks wrong without needing browser devtools access.
+app.get('/api/debug/skin/:id', (req, res) => {
+  const auction = sniper.auctions.get(req.params.id);
+  if (!auction) return res.status(404).json({ error: 'not tracked' });
+  res.json({
+    skin: auction.auctionedSkinId,
+    currentBid: auction.currentBid,
+    dollarEstimate: priceData.calcDollarPrice(auction.auctionedSkinId || {}),
+  });
+});
+
 app.post('/api/settings', (req, res) => {
   const patch = req.body || {};
   store.updateSettings(patch);

@@ -370,7 +370,11 @@ class Sniper {
     // pricedata-script estimate for every tracked auction, not just the ones we're bidding on.
     const valuation = await valuateAuction(auction);
     auction._marketValueTokens = valuation.marketValueTokens;
-    auction._marketValueDollars = valuation.dollarEstimate?.calc ?? null;
+    // Don't surface the raw $ estimate for an unpriced-special (event/rare-float item the formula
+    // has no real number for) -- it's the misleadingly-tiny native price, and showing it as if it
+    // were a market value would corrupt anything that sums it (holdings P&L, discount %, etc.)
+    // just as much as bidding on it would.
+    auction._marketValueDollars = valuation.confidence === 'unpriced-special' ? null : (valuation.dollarEstimate?.calc ?? null);
     auction._valuationConfidence = valuation.confidence;
     auction._fxSource = valuation.fx?.source ?? null;
 
